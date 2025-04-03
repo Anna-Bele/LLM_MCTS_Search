@@ -84,6 +84,7 @@ class SearchStrategy(Object):
             "replay-func",
             "replay-trace",
             "evolutionary",
+            "mcts",
         ],
     ]
 
@@ -179,6 +180,7 @@ class SearchStrategy(Object):
     def create(  # pylint: disable=keyword-arg-before-vararg
         kind: Literal[
             "evolutionary",
+            "mcts",
             "replay-trace",
             "replay-func",
         ] = "evolutionary",
@@ -188,12 +190,15 @@ class SearchStrategy(Object):
         """Create a search strategy."""
         from . import (  # pylint: disable=import-outside-toplevel
             EvolutionarySearch,
+            MCTSSearchPyFull,
             ReplayFunc,
             ReplayTrace,
         )
 
         if kind == "evolutionary":
             return EvolutionarySearch(*args, **kwargs)
+        if kind == "mcts":
+            return MCTSSearchPyFull(*args, **kwargs)
         if kind == "replay-trace":
             return ReplayTrace(*args, **kwargs)
         if kind == "replay-func":
