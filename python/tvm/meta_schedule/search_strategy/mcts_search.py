@@ -415,7 +415,7 @@ class MCTSTuner:
             return random.random()  # fallback random
         arg_info = ArgInfo.from_entry_func(new_sch.mod, remove_preproc=True)
         candidate = MeasureCandidate(new_sch, arg_info)
-        preds = self._cost_model.predict(self._workload_key, [candidate])
+        preds = self._cost_model.predict(self._ctx, [candidate])
         if preds:
             return max(0.0, preds[0])
         return 0.0
@@ -588,7 +588,7 @@ class MCTSTuner:
         for sch in schedules:
             arg_info = ArgInfo.from_entry_func(sch.mod, remove_preproc=True)
             cands.append(MeasureCandidate(sch, arg_info))
-        scores = self._cost_model.predict(self._workload_key, cands)
+        scores = self._cost_model.predict(self._ctx, cands)
         return [max(0.0, sc) for sc in scores]
 
     # -------------------------------------------------------------------------
@@ -901,29 +901,26 @@ class MCTSTuningState:
 
     def _replay_schedule(self, trace: Optional[Trace]) -> Optional[Schedule]:
         """
-        Basic replay for a trace from DB (like the tuner’s _replay_schedule).
+        Basic replay for a trace from the database (similar to the tuner’s _replay_schedule).
         """
+        # If there's no trace or context, we can't replay anything
         if not trace or not self.context or not self.context.mod:
             return None
+        
         mod = self.context.mod
+        
         try:
+            # Create a fresh schedule from the module
             sch = Schedule(mod, debug_mask="all")
+            # Apply the trace instructions, skipping any postproc instructions
             trace.apply_to_schedule(sch, remove_postproc=True)
         except (InvalidScheduleError, tvm.TVMError):
             return None
-
+    
+        # Enter postproc mode so we can manually run the final constraints
         sch.enter_postproc()
-        # Try FFI postprocs if available
-        if hasattr(_ffi_api, "SearchStrategyApplyPostprocs"):
-            try:
-                ok = _ffi_api.SearchStrategyApplyPostprocs(sch, self.tuner._postprocs)  # type: ignore
-                if not ok:
-                    return None
-                return sch
-            except Exception:
-                pass
-
-        # fallback: python-based postprocs
+        
+        # Just call your Python-based postprocs directly
         for proc in self.tuner._postprocs:
             try:
                 if not proc.apply(sch):
@@ -1020,7 +1017,7 @@ class MCTSSearchPyFull(PySearchStrategy):
         genetic_mutate_prob: float,
         genetic_max_fail_count: int,
         num_empty_iters_before_early_stop: int = 5,
-        max_stale_iters: int = 6,
+        max_stale_iters: int = 12,
         diversity_epsilon: float = 1e-6,
         max_stale_diversity_iters: int = 3,
         trace_commit: bool = True,
