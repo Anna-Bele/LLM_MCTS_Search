@@ -43,6 +43,7 @@ except ImportError:
     InvalidScheduleError = tvm.TVMError
 
 logger = logging.getLogger("meta_schedule")
+logger.setLevel(logging.DEBUG)
 
 
 # -----------------------------------------------------------------------------
@@ -245,35 +246,64 @@ class MCTSTuner:
     def explore(
         self,
         mcts_root: MCTSNode,
-        population: List[Tuple[Schedule, bool]],
+        population: List[Tuple[tvm.tir.Schedule, bool]],
         dynamic_pop_size: int,
         rand_state: int,
-    ) -> List[Tuple[Schedule, bool]]:
+    ) -> List[Tuple[tvm.tir.Schedule, bool]]:
         """
         Perform expansions (self.genetic_num_iters times) from mcts_root,
-        gather all nodes, rank them with cost model => return new population
-        of size dynamic_pop_size.
+        in each iteration try to generate up to `dynamic_pop_size` new children.
+        Then gather all nodes, rank them, and return the new top-K population.
         """
+        logger.warning("[DEBUG] explore() called with dynamic_pop_size=%d", dynamic_pop_size)
+
+        # If our root is somehow empty, just return the old population
         if not mcts_root or not mcts_root.children:
-            # nothing to explore
             return population
 
-        # expansions
-        for _ in range(self.genetic_num_iters):
-            leaf = self._select(mcts_root)
-            if leaf is None:
-                break
-            new_node = self._expand(leaf, rand_state)
-            if not new_node:
-                continue
-            value = self._simulate_node(new_node, rand_state)
-            self._backprop(new_node, value)
+        # For each "generation"
+        for gen_iter in range(self.genetic_num_iters):
+            new_children_count = 0
+            fail_count = 0
 
-        # gather all nodes => build new population
+            while new_children_count < dynamic_pop_size:
+                # 1) UCB selection
+                leaf = self._select(mcts_root)
+                if leaf is None:
+                    # means we couldn't pick a leaf at all
+                    if self.verbose >= 2:
+                        logger.warning("explore(): MCTS: Leaf is None in selection => break expansions.")
+                    break
+
+                # 2) Expand
+                new_node = self._expand(leaf, rand_state)
+                if new_node is None:
+                    fail_count += 1
+                    if fail_count >= self.genetic_max_fail_count:
+                        if self.verbose >= 2:
+                            logger.warning("explore(): MCTS: Too many expansion failures => break expansions.")
+                        break
+                    # otherwise keep trying
+                    continue
+
+                # 3) Simulation
+                value = self._simulate_node(new_node, rand_state)
+                # 4) Backprop
+                self._backprop(new_node, value)
+
+                new_children_count += 1
+
+            if self.verbose >= 2:
+                logger.warning(
+                    "explore(): MCTS (gen_iter=%d): expansions=%d, fail_count=%d",
+                    gen_iter, new_children_count, fail_count
+                )
+
+        # Now we gather *all* nodes in the MCTS tree and pick the top-K
         all_nodes = self._gather_tree_schedules(mcts_root)
         pop_schedules = [node.schedule for node in all_nodes if node.schedule is not None]
 
-        # rank by cost-model predictions
+        # Cost-model-based ranking
         heap = _SizedMinHeap(size_limit=dynamic_pop_size)
         preds = self._predict_normalized_score(pop_schedules)
         for sch, pred_score in zip(pop_schedules, preds):
@@ -283,9 +313,12 @@ class MCTSTuner:
             measured_flag = (wl is not None) and (wl in self._measured_workloads)
             heap.push(sch, pred_score, measured_flag)
 
+        # Build the new population from the top items
         best_items = heap.items_descending()
         new_population = [(sch, meas) for (score, sch, meas) in best_items]
+
         return new_population
+
 
     # -------------------------------------------------------------------------
     # MCTS steps: selection, expansion, simulation, backprop
@@ -688,6 +721,13 @@ class MCTSTuningState:
         """
         Orchestrates MCTS expansions and picks unmeasured best leaves as measure candidates.
         """
+        if self.tuner.verbose >= 1:
+            logger.warning(
+                "[DEBUG] Enter generate_measure_candidates: trial_count=%d, max_trials=%d",
+                self.trial_count, self.max_trials
+            )
+
+
         if self.trial_count >= self.max_trials:
             return None
 
@@ -709,7 +749,7 @@ class MCTSTuningState:
             self.used_init_population = True
 
             if self.tuner.verbose >= 1:
-                logger.info("MCTS: Initialized root with %d child schedules.", len(init_pop))
+                logger.warning("generate_measure_candidates: MCTS: Initialized root with %d child schedules.", len(init_pop))
 
         # Expand and get updated population
         self.population = self.tuner.explore(
@@ -725,11 +765,11 @@ class MCTSTuningState:
             # no unmeasured => increment empty iter
             self.num_empty_iters += 1
             if self.tuner.verbose >= 1:
-                logger.info("MCTS: No unmeasured => empty iters=%d", self.num_empty_iters)
+                logger.warning("generate_measure_candidates: MCTS: No unmeasured => empty iters=%d", self.num_empty_iters)
             if self.num_empty_iters >= self.tuner.num_empty_iters_before_early_stop:
                 # early stop
                 if self.tuner.verbose >= 1:
-                    logger.info("MCTS: Stopping early => repeated empty iters.")
+                    logger.warning("generate_measure_candidates: MCTS: Stopping early => repeated empty iters.")
                 return None
             return None
 
@@ -740,9 +780,13 @@ class MCTSTuningState:
             measure_cands.append(MeasureCandidate(sch, arg_info))
 
         if self.tuner.verbose >= 1:
-            logger.info(
-                "MCTS: generate_measure_candidates => %d cands, total measured so far=%d",
-                len(measure_cands), self.trial_count
+            logger.warning(
+                "generate_measure_candidates: [DEBUG] MCTS generate_measure_candidates => returning %d cands.  "
+                "trial_count=%d, batch_size_requested=%d, used_init_population=%s",
+                len(measure_cands),
+                self.trial_count,
+                batch_size,
+                str(self.used_init_population),
             )
         return measure_cands
 
@@ -762,7 +806,7 @@ class MCTSTuningState:
           - deciding if we are "stale" or should early-stop
         """
         if self.database is None:
-            logger.debug("database is not defined, skipping MCTS measure update.")
+            logger.warning("database is not defined, skipping MCTS measure update.")
             return
 
         num_measured_now = 0
@@ -797,49 +841,49 @@ class MCTSTuningState:
             else:
                 self.stale_iter_count += 1
                 if self.stale_iter_count >= self.tuner.max_stale_iters and self.tuner.verbose >= 1:
-                    logger.info(
-                        "MCTS: No improvement => stopping early (stale_iter=%d).",
+                    logger.warning(
+                        "notifu_runner_results: MCTS: No improvement => stopping early (stale_iter=%d).",
                         self.stale_iter_count
                     )
         else:
             # no valid runs => score=0
             self.score_history.append(0.0)
 
-        # Check population diversity
-        if self.population:
-            pop_scores = self._predict_population_scores(self.population)
-            diversity = self._check_population_diversity(pop_scores)
-            if diversity < self.tuner.diversity_epsilon:
-                self.stale_diversity_count += 1
-                if self.tuner.verbose >= 1:
-                    logger.info(
-                        "MCTS: Pop diversity=%.6f < threshold => stale_diversity_count=%d",
-                        diversity, self.stale_diversity_count
-                    )
-                if self.stale_diversity_count >= self.tuner.max_stale_diversity_iters:
-                    if self.tuner.verbose >= 1:
-                        logger.info("MCTS: Population too homogeneous => stopping early.")
-            else:
-                self.stale_diversity_count = 0
+        # # Check population diversity
+        # if self.population:
+        #     pop_scores = self._predict_population_scores(self.population)
+        #     diversity = self._check_population_diversity(pop_scores)
+        #     if diversity < self.tuner.diversity_epsilon:
+        #         self.stale_diversity_count += 1
+        #         if self.tuner.verbose >= 1:
+        #             logger.info(
+        #                 "MCTS: Pop diversity=%.6f < threshold => stale_diversity_count=%d",
+        #                 diversity, self.stale_diversity_count
+        #             )
+        #         if self.stale_diversity_count >= self.tuner.max_stale_diversity_iters:
+        #             if self.tuner.verbose >= 1:
+        #                 logger.info("MCTS: Population too homogeneous => stopping early.")
+        #     else:
+        #         self.stale_diversity_count = 0
 
         # Adaptive population resizing example
-        if self.population:
-            if self.stale_diversity_count > 0:
-                old_size = self.dynamic_pop_size
-                self.dynamic_pop_size = max(10, int(self.dynamic_pop_size * 0.9))
-                if self.tuner.verbose >= 1:
-                    logger.info(
-                        "MCTS: Adaptive pop resize: %d -> %d",
-                        old_size, self.dynamic_pop_size
-                    )
-            else:
-                self.dynamic_pop_size = min(
-                    self.tuner.population_size,
-                    self.dynamic_pop_size + 5
-                )
+        #if self.population:
+        #    if self.stale_diversity_count > 0:
+        #        old_size = self.dynamic_pop_size
+        #        self.dynamic_pop_size = max(10, int(self.dynamic_pop_size * 0.9))
+        #        if self.tuner.verbose >= 1:
+        #            logger.info(
+        #                "MCTS: Adaptive pop resize: %d -> %d",
+        #                old_size, self.dynamic_pop_size
+        #            )
+        #    else:
+        #        self.dynamic_pop_size = min(
+        #            self.tuner.population_size,
+        #            self.dynamic_pop_size + 5
+        #        )
 
         if self.tuner.verbose >= 1:
-            logger.info(
+            logger.warning(
                 "MCTS: notify_runner_results => measured=%d, total=%d, stale_iter=%d, div_stale=%d",
                 num_measured_now, self.trial_count, self.stale_iter_count, self.stale_diversity_count
             )
@@ -1016,15 +1060,15 @@ class MCTSSearchPyFull(PySearchStrategy):
         genetic_num_iters: int,
         genetic_mutate_prob: float,
         genetic_max_fail_count: int,
-        num_empty_iters_before_early_stop: int = 5,
-        max_stale_iters: int = 12,
+        num_empty_iters_before_early_stop: int = 100,
+        max_stale_iters: int = 60,
         diversity_epsilon: float = 1e-6,
-        max_stale_diversity_iters: int = 3,
+        max_stale_diversity_iters: int = 30,
         trace_commit: bool = True,
-        verbose: int = 1,
+        verbose: int = 2,
         # MCTS-specific:
         mcts_ucb_constant: float = 1.41,
-        mcts_max_depth: Optional[int] = 20,
+        mcts_max_depth: Optional[int] = 200,
         mcts_num_threads: int = 1,
         mcts_num_rollouts_per_expansion: int = 1,
     ) -> None:
@@ -1096,8 +1140,8 @@ class MCTSSearchPyFull(PySearchStrategy):
                 self._mutator_probs[k] /= total_p
 
         if self.verbose >= 1:
-            logger.info(
-                "MCTSSearch: Using target=%s, found #mutators=%d, rand_state=%s",
+            logger.warning(
+                "_initialize_with_tune_context: MCTSSearch: Using target=%s, found #mutators=%d, rand_state=%s",
                 target_kind, len(self._mutator_probs), str(context.rand_state)
             )
 
@@ -1154,7 +1198,7 @@ class MCTSSearchPyFull(PySearchStrategy):
         )
 
         if self.verbose >= 1:
-            logger.info(
+            logger.warning(
                 "MCTSSearch.pre_tuning => max_trials=%d, num_per_iter=%d, #design_spaces=%d",
                 max_trials, num_trials_per_iter, len(design_spaces)
             )
@@ -1168,7 +1212,7 @@ class MCTSSearchPyFull(PySearchStrategy):
             self.state.reset()
             self.state = None
         if self.verbose >= 1:
-            logger.info("MCTSSearch: Tuning finished in post_tuning().")
+            logger.warning("MCTSSearch: Tuning finished in post_tuning().")
 
     def generate_measure_candidates(self) -> Optional[List[MeasureCandidate]]:
         """

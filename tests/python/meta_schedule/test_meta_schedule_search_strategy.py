@@ -342,7 +342,7 @@ def test_meta_schedule_mcts_basic():
             },
         ),
         search_strategy=MCTSSearchPyFull(
-            population_size=5,
+            population_size=64,
             init_measured_ratio=0.1,
             init_min_unmeasured=1,
             max_fail_count=10,
