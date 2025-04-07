@@ -253,57 +253,110 @@ class MCTSTuner:
         """
         Perform expansions (self.genetic_num_iters times) from mcts_root,
         in each iteration try to generate up to `dynamic_pop_size` new children.
-        Then gather all nodes, rank them, and return the new top-K population.
+        Then gather all nodes, rank them, and return the new top-K unmeasured 
+        schedules (with measured-flag).
         """
-        logger.warning("[DEBUG] explore() called with dynamic_pop_size=%d", dynamic_pop_size)
+        logger.warning(
+            "[DEBUG] explore() called with dynamic_pop_size=%d, genetic_num_iters=%d",
+            dynamic_pop_size,
+            self.genetic_num_iters
+        )
 
         # If our root is somehow empty, just return the old population
         if not mcts_root or not mcts_root.children:
+            logger.warning("explore(): Root is empty or has no children. Returning existing population.")
             return population
+
+        total_expansions = 0  # track total expansions across all generations
 
         # For each "generation"
         for gen_iter in range(self.genetic_num_iters):
             new_children_count = 0
             fail_count = 0
 
+            logger.warning("explore(): Starting generation %d ...", gen_iter)
+
             while new_children_count < dynamic_pop_size:
                 # 1) UCB selection
                 leaf = self._select(mcts_root)
                 if leaf is None:
                     # means we couldn't pick a leaf at all
-                    if self.verbose >= 2:
-                        logger.warning("explore(): MCTS: Leaf is None in selection => break expansions.")
+                    logger.warning(
+                        "explore(): MCTS: Leaf is None in selection => break expansions."
+                    )
                     break
+
+                logger.warning(
+                    "explore(): [gen=%d] Selected leaf node at depth=%d with %d children",
+                    gen_iter, leaf.depth, len(leaf.children)
+                )
 
                 # 2) Expand
                 new_node = self._expand(leaf, rand_state)
                 if new_node is None:
                     fail_count += 1
+                    logger.warning(
+                        "explore(): Failed to expand leaf at depth=%d (fail_count=%d)",
+                        leaf.depth, fail_count
+                    )
                     if fail_count >= self.genetic_max_fail_count:
-                        if self.verbose >= 2:
-                            logger.warning("explore(): MCTS: Too many expansion failures => break expansions.")
+                        logger.warning(
+                            "explore(): Too many expansion failures => break expansions."
+                        )
                         break
                     # otherwise keep trying
                     continue
 
-                # 3) Simulation
-                value = self._simulate_node(new_node, rand_state)
-                # 4) Backprop
-                self._backprop(new_node, value)
-
-                new_children_count += 1
-
-            if self.verbose >= 2:
                 logger.warning(
-                    "explore(): MCTS (gen_iter=%d): expansions=%d, fail_count=%d",
-                    gen_iter, new_children_count, fail_count
+                    "explore(): Successfully expanded leaf at depth=%d => new node at depth=%d; "
+                    "now leaf has %d children total",
+                    leaf.depth, new_node.depth, len(leaf.children)
                 )
 
-        # Now we gather *all* nodes in the MCTS tree and pick the top-K
-        all_nodes = self._gather_tree_schedules(mcts_root)
-        pop_schedules = [node.schedule for node in all_nodes if node.schedule is not None]
+                # 3) Simulation
+                value = self._simulate_node(new_node, rand_state)
+                logger.warning(
+                    "explore(): Simulation done for new node at depth=%d => value=%.4f",
+                    new_node.depth, value
+                )
 
-        # Cost-model-based ranking
+                # 4) Backprop
+                self._backprop(new_node, value)
+                logger.warning(
+                    "explore(): Backprop done => node visits=%d, total_value=%.4f",
+                    new_node.visits, new_node.total_value
+                )
+
+                new_children_count += 1
+                total_expansions += 1
+
+            logger.warning(
+                "explore(): [gen=%d] expansions=%d, fail_count=%d so far in this generation",
+                gen_iter, new_children_count, fail_count
+            )
+
+        # Post-expansion summary
+        logger.warning(
+            "explore(): All expansions complete => total_expansions=%d across %d generations.",
+            total_expansions, self.genetic_num_iters
+        )
+
+        # Now we gather *all* nodes in the MCTS tree and pick top-K 
+        # based on cost-model predictions, skipping measured schedules
+        all_nodes = self._gather_tree_schedules(mcts_root)
+        logger.warning(
+            "explore(): Gathered %d total nodes (with schedules) from the MCTS tree.",
+            len(all_nodes)
+        )
+
+        pop_schedules = [node.schedule for node in all_nodes if node.schedule is not None]
+        logger.warning(
+            "explore(): Of those nodes, %d have a non-None schedule.", len(pop_schedules)
+        )
+
+        # Cost-model-based ranking:
+        #   - skip measured schedules
+        #   - keep top dynamic_pop_size by predicted score
         heap = _SizedMinHeap(size_limit=dynamic_pop_size)
         preds = self._predict_normalized_score(pop_schedules)
         for sch, pred_score in zip(pop_schedules, preds):
@@ -311,13 +364,21 @@ class MCTSTuner:
             if self._database:
                 wl = self._database.commit_workload(sch.mod)
             measured_flag = (wl is not None) and (wl in self._measured_workloads)
+            # If it's already measured, skip it from the top-K ranking
+            if measured_flag:
+                continue
             heap.push(sch, pred_score, measured_flag)
 
         # Build the new population from the top items
         best_items = heap.items_descending()
         new_population = [(sch, meas) for (score, sch, meas) in best_items]
+        logger.warning(
+            "explore(): new_population size=%d after cost-model-based ranking (top-K).",
+            len(new_population)
+        )
 
         return new_population
+
 
 
     # -------------------------------------------------------------------------
@@ -719,14 +780,14 @@ class MCTSTuningState:
     # -------------------------------------------------------------------------
     def generate_measure_candidates(self) -> Optional[List[MeasureCandidate]]:
         """
-        Orchestrates MCTS expansions and picks unmeasured best leaves as measure candidates.
+        Orchestrates MCTS expansions and picks unmeasured best schedules 
+        as measure candidates (directly from explore()).
         """
         if self.tuner.verbose >= 1:
             logger.warning(
                 "[DEBUG] Enter generate_measure_candidates: trial_count=%d, max_trials=%d",
                 self.trial_count, self.max_trials
             )
-
 
         if self.trial_count >= self.max_trials:
             return None
@@ -749,9 +810,12 @@ class MCTSTuningState:
             self.used_init_population = True
 
             if self.tuner.verbose >= 1:
-                logger.warning("generate_measure_candidates: MCTS: Initialized root with %d child schedules.", len(init_pop))
+                logger.warning(
+                    "generate_measure_candidates: MCTS: Initialized root with %d child schedules.",
+                    len(init_pop)
+                )
 
-        # Expand and get updated population
+        # Expand and get updated top-K unmeasured schedules
         self.population = self.tuner.explore(
             mcts_root=self.mcts_root,
             population=self.population,
@@ -759,13 +823,14 @@ class MCTSTuningState:
             rand_state=self.rand_state,
         )
 
-        # pick the best unmeasured leaves
-        picks = self.tuner.pick_unmeasured_best_leaves(self.mcts_root, batch_size)
-        if not picks:
-            # no unmeasured => increment empty iter
+        if not self.population:
+            # no unmeasured => increment empty iters
             self.num_empty_iters += 1
             if self.tuner.verbose >= 1:
-                logger.warning("generate_measure_candidates: MCTS: No unmeasured => empty iters=%d", self.num_empty_iters)
+                logger.warning(
+                    "generate_measure_candidates: MCTS: explore() returned empty => empty iters=%d",
+                    self.num_empty_iters
+                )
             if self.num_empty_iters >= self.tuner.num_empty_iters_before_early_stop:
                 # early stop
                 if self.tuner.verbose >= 1:
@@ -773,16 +838,38 @@ class MCTSTuningState:
                 return None
             return None
 
-        # Convert schedules => measure candidates
+        # Build measure candidates from the top unmeasured schedules (up to batch_size)
+        unmeasured_schedules = []
+        for (sch, measured_flag) in self.population:
+            if not measured_flag:
+                unmeasured_schedules.append(sch)
+
+        if not unmeasured_schedules:
+            # again, no unmeasured => empty iteration
+            self.num_empty_iters += 1
+            if self.tuner.verbose >= 1:
+                logger.warning(
+                    "generate_measure_candidates: MCTS: no unmeasured schedules => empty iters=%d",
+                    self.num_empty_iters
+                )
+            if self.num_empty_iters >= self.tuner.num_empty_iters_before_early_stop:
+                if self.tuner.verbose >= 1:
+                    logger.warning("generate_measure_candidates: stopping early => repeated empty iters.")
+                return None
+            return None
+
+        # Truncate to the batch_size we want
+        unmeasured_schedules = unmeasured_schedules[:batch_size]
+
         measure_cands: List[MeasureCandidate] = []
-        for sch in picks:
+        for sch in unmeasured_schedules:
             arg_info = ArgInfo.from_entry_func(sch.mod, remove_preproc=True)
             measure_cands.append(MeasureCandidate(sch, arg_info))
 
         if self.tuner.verbose >= 1:
             logger.warning(
-                "generate_measure_candidates: [DEBUG] MCTS generate_measure_candidates => returning %d cands.  "
-                "trial_count=%d, batch_size_requested=%d, used_init_population=%s",
+                "generate_measure_candidates: [DEBUG] MCTS => returning %d cands; trial_count=%d, "
+                "batch_size_requested=%d, used_init_population=%s",
                 len(measure_cands),
                 self.trial_count,
                 batch_size,
@@ -905,6 +992,14 @@ class MCTSTuningState:
             self.tuner.init_min_unmeasured
         )
         unmeasured_rand = self._sample_init_population(need_rand)
+
+        logger.warning(
+            "[MCTS init_pop] from DB: %d, from random: %d, population_size=%d, init_min_unmeasured=%d",
+            len(measured_from_db),
+            len(unmeasured_rand),
+            self.tuner.population_size,
+            self.tuner.init_min_unmeasured
+        )
 
         combined = [(sch, True) for sch in measured_from_db] + \
                    [(sch, False) for sch in unmeasured_rand]
