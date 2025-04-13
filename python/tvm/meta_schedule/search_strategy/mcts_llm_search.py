@@ -1298,7 +1298,7 @@ class MCTSTuningState:
 # The final MCTS search strategy to register with MetaSchedule
 # -----------------------------------------------------------------------------
 @derived_object
-class MCTSSearchPyFull(PySearchStrategy):
+class MCTSLLMSearch(PySearchStrategy):
     """
     An MCTS-based search strategy aligned with MetaSchedule 0.20+ best practices.
     It uses Monte Carlo Tree Search over the design space, letting default measure
@@ -1498,12 +1498,12 @@ class MCTSSearchPyFull(PySearchStrategy):
         if self.state:
             self.state.notify_runner_results(measure_candidates, results)
 
-    def clone(self) -> "MCTSSearchPyFull":
+    def clone(self) -> "MCTSLLMSearch":
         """
         Clone the search strategy. The new copy has no TuningState; it must be
         re-initialized with pre_tuning.
         """
-        return MCTSSearchPyFull(
+        return MCTSLLMSearch(
             population_size=self.population_size,
             init_measured_ratio=self.init_measured_ratio,
             init_min_unmeasured=self.init_min_unmeasured,
