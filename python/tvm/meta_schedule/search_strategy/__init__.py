@@ -25,3 +25,4 @@ from .mcts_search import MCTSSearchPyFull
 from .replay_func import ReplayFunc
 from .replay_trace import ReplayTrace
 from .search_strategy import MeasureCandidate, PySearchStrategy, SearchStrategy, create
+from .llm_guidance import LLMGuidancePolicy
