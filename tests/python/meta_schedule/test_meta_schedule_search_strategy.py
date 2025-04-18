@@ -390,6 +390,84 @@ def test_meta_schedule_mcts_basic():
     assert total_trials <= max_trials_per_task
     assert len(trial_counts) >= 1
 
+from tvm.meta_schedule.search_strategy import MCTSLLMSearch
+
+def test_meta_schedule_mcts_llm_basic():
+    """Basic test of MCTS: ensures we can generate measure candidates, check their schedule,
+    and not exceed the max trial budget."""
+    # Define a small scheduling function (inspired by the evolutionary test)
+    def _schedule_matmul_small(sch: Schedule):
+        block = sch.get_block("matmul")
+        _, j, k = sch.get_loops(block=block)
+        # Perform a perfect tile split on the 'j' and 'k' loops
+        _, _ = sch.split(j, sch.sample_perfect_tile(j, n=2))
+        _, _ = sch.split(k, sch.sample_perfect_tile(k, n=2))
+
+    num_trials_per_iter = 3
+    max_trials_per_task = 8
+
+    # Generate the correct schedule using the original schedule function for reference
+    (correct_sch,) = ms.space_generator.ScheduleFn(sch_fn=_schedule_matmul).generate_design_space(Matmul)
+
+    context = ms.TuneContext(
+        mod=Matmul,
+        space_generator=ms.space_generator.ScheduleFn(
+            sch_fn=_schedule_matmul_small,
+            sch_rules=[], 
+            postprocs=[], 
+            mutator_probs={
+                DummyMutator(): 1.0,
+            },
+        ),
+        search_strategy=MCTSLLMSearch(
+            population_size=64,
+            init_measured_ratio=0.1,
+            init_min_unmeasured=1,
+            max_fail_count=10,
+            genetic_num_iters=10,  # number of expansions
+            genetic_mutate_prob=0.5,
+            genetic_max_fail_count=3,
+            mcts_ucb_constant=1.41,
+            mcts_num_threads=1,
+            mcts_num_rollouts_per_expansion=1,
+            verbose=1,
+        ),
+        target=tvm.target.Target("llvm"),
+        num_threads=1,  # single-threaded for consistency with Python-side mutators
+    )
+    strategy = context.search_strategy
+    design_spaces = context.space_generator.generate_design_space(context.mod)
+    print(design_spaces)
+
+    strategy.pre_tuning(
+        max_trials=max_trials_per_task,
+        num_trials_per_iter=num_trials_per_iter,
+        design_spaces=design_spaces,
+        database=ms.database.MemoryDatabase(),
+        cost_model=ms.cost_model.RandomModel(),
+    )
+
+    trial_counts: List[int] = []
+    candidates = strategy.generate_measure_candidates()
+    while candidates is not None:
+        trial_counts.append(len(candidates))
+        runner_results: List[ms.runner.RunnerResult] = []
+        for candidate in candidates:
+            # Check that the candidate schedule matches the expected schedule
+            _is_trace_equal(
+                candidate.sch,
+                correct_sch,
+                remove_decisions=isinstance(strategy, ms.search_strategy.ReplayTrace),
+            )
+            runner_results.append(ms.runner.RunnerResult(run_secs=[0.1, 0.2], error_msg=None))
+        strategy.notify_runner_results(candidates, runner_results)
+        candidates = strategy.generate_measure_candidates()
+
+    strategy.post_tuning()
+    total_trials = sum(trial_counts)
+    assert total_trials <= max_trials_per_task
+    assert len(trial_counts) >= 1
+
 
 
 def test_meta_schedule_mcts_multithread():

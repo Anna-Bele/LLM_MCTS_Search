@@ -85,6 +85,7 @@ class SearchStrategy(Object):
             "replay-trace",
             "evolutionary",
             "mcts",
+            "mcts-llm"
         ],
     ]
 
@@ -183,6 +184,7 @@ class SearchStrategy(Object):
             "mcts",
             "replay-trace",
             "replay-func",
+            "mcts-llm",
         ] = "evolutionary",
         *args,
         **kwargs,
@@ -191,6 +193,7 @@ class SearchStrategy(Object):
         from . import (  # pylint: disable=import-outside-toplevel
             EvolutionarySearch,
             MCTSSearchPyFull,
+            MCTSLLMSearch,
             ReplayFunc,
             ReplayTrace,
         )
@@ -199,6 +202,8 @@ class SearchStrategy(Object):
             return EvolutionarySearch(*args, **kwargs)
         if kind == "mcts":
             return MCTSSearchPyFull(*args, **kwargs)
+        if kind == "mcts-llm":
+            return MCTSLLMSearch(*args, **kwargs)
         if kind == "replay-trace":
             return ReplayTrace(*args, **kwargs)
         if kind == "replay-func":

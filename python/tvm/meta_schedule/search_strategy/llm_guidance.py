@@ -87,6 +87,7 @@ class LLMGuidancePolicy:
         )
 
         try:
+            logger.warning("You're here inside LLMGuidancePolicy at line 90")
             # 3) Call OpenAI ChatCompletion
             response = client.chat.completions.create(
                 model=self.model_name,
@@ -95,10 +96,11 @@ class LLMGuidancePolicy:
                     {"role": "user", "content": user_prompt},
                 ],
             )
+            logger.warning("You're here inside LLMGuidancePolicy at line 99")
 
-            content = response["choices"][0]["message"]["content"]
+            content = response.choices[0].message.content
             if self.verbose:
-                logger.info("LLM raw response:\n%s", content)
+                logger.warning("LLM raw response:\n%s", content)
 
             # 4) Parse the model's response to find "Mutator: X"
             chosen = self._extract_mutator_name(content, available_mutators)

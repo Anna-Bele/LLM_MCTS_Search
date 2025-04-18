@@ -29,6 +29,7 @@ from ..postproc import Postproc
 from ..mutator import Mutator
 from ..database import Workload
 from .. import _ffi_api
+from .llm_guidance import LLMGuidancePolicy
 
 if TYPE_CHECKING:
     from ..cost_model import CostModel
@@ -199,6 +200,9 @@ class MCTSTuner:
         cost_model: Optional["CostModel"],
         database: Optional["Database"],
         workload_key: Optional[Workload],
+        use_llm: bool = False,
+        llm_budget: int = 1,
+        llm_policy: Optional["LLMGuidancePolicy"] = None,
     ):
         self.population_size = population_size
         self.init_measured_ratio = init_measured_ratio
@@ -232,6 +236,10 @@ class MCTSTuner:
 
         # Will be set by attach_search_state()
         self._search_state: Optional["MCTSTuningState"] = None
+
+        self.use_llm = use_llm
+        self.llm_budget = llm_budget
+        self.llm_policy = llm_policy
 
     def attach_search_state(self, search_state: "MCTSTuningState") -> None:
         """
@@ -428,12 +436,202 @@ class MCTSTuner:
             return None
         if leaf.schedule is None:
             return None
-        new_sch = self._try_mcts_mutation(leaf.schedule, rand_state)
-        if not new_sch:
-            return None
-        child = MCTSNode(schedule=new_sch, parent=leaf, depth=leaf.depth + 1)
-        leaf.children.append(child)
-        return child
+        can_use_llm = (
+            self.use_llm
+            and self.llm_policy is not None
+            and self.llm_budget > 0
+            and (3<= leaf.depth <= 5)
+            # and (3<= leaf.depth <= 5 or len(leaf.children) == 0)
+        )
+        if not can_use_llm:
+            logger.warning("Not using LLM (either disabled, no budget, or depth/children constraints). Using random mutator.")
+            new_sch = self._try_mcts_mutation(leaf.schedule, rand_state)
+            if not new_sch:
+                return None
+            child = MCTSNode(schedule=new_sch, parent=leaf, depth=leaf.depth + 1)
+            leaf.children.append(child)
+            return child
+        else:
+            logger.warning("LLM usage is enabled. Gathering historical info for leaf, parent, and grandparent schedules.")
+            new_sch = None
+            historical_perf_parts = []
+            try:
+                # --- Current schedule ---
+                leaf_score_list = self._predict_normalized_score([leaf.schedule])
+                leaf_score = leaf_score_list[0] if leaf_score_list else 0.0
+                try:
+                    leaf_mod_str = leaf.schedule.mod.script()
+                except Exception:
+                    leaf_mod_str = "<failed to script IR>"
+                leaf_trace_str = str(leaf.schedule.trace)
+                historical_perf_parts.append(
+                    "Current Schedule:\n"
+                    f"Current Schedule's IR:\n{leaf_mod_str}\n\n"
+                    f"Current Schedule's Trace:\n{leaf_trace_str}\n\n"
+                    f"Current Schedule's Predicted Score by TVM's default cost model XGBoost: {leaf_score}\n"
+                )
+    
+                # --- Immediate parent schedule ---
+                parent_node = leaf.parent
+                if parent_node and parent_node.schedule is not None:
+                    p1_sch = parent_node.schedule
+                    scores_p1 = self._predict_normalized_score([p1_sch])
+                    score_p1 = scores_p1[0] if scores_p1 else 0.0
+    
+                    try:
+                        p1_mod_str = p1_sch.mod.script()
+                    except Exception:
+                        p1_mod_str = "<failed to script IR>"
+                    p1_trace_str = str(p1_sch.trace)
+                    historical_perf_parts.append(
+                        "Immediate Parent Schedule:\n"
+                        f"Immediate Parent's IR:\n{p1_mod_str}\n\n"
+                        f"Immediate Parent's Trace:\n{p1_trace_str}\n\n"
+                        f"Immediate Parent's Predicted Score by TVM's default cost model XGBoost: {score_p1}\n"
+                    )
+    
+                    # --- Grandparent schedule ---
+                    grandparent_node = parent_node.parent
+                    if grandparent_node and grandparent_node.schedule is not None:
+                        p2_sch = grandparent_node.schedule
+                        scores_p2 = self._predict_normalized_score([p2_sch])
+                        score_p2 = scores_p2[0] if scores_p2 else 0.0
+    
+                        try:
+                            p2_mod_str = p2_sch.mod.script()
+                        except Exception:
+                            p2_mod_str = "<failed to script IR>"
+                        p2_trace_str = str(p2_sch.trace)
+                        historical_perf_parts.append(
+                            "Grandparent Schedule:\n"
+                            f"Grandparent's IR:\n{p2_mod_str}\n\n"
+                            f"Grandparent's Trace:\n{p2_trace_str}\n\n"
+                            f"Grandparent's Predicted Score by TVM's default cost model XGBoost: {score_p2}\n"
+                        )
+            except Exception as e:
+                if self.verbose >= 1:
+                    logger.warning("Failed to gather historical info for Leaf/Parent/Grandparent: %s", str(e))
+    
+            # Combine all info into one prompt string
+            historical_perf = "\n\n".join(historical_perf_parts) if historical_perf_parts else None
+    
+            # -------------------------------------------------------------------------
+            # 5) Call the LLM to pick the mutator
+            # -------------------------------------------------------------------------
+            logger.warning("Invoking LLM policy to pick a mutator.")
+            possible_mutator_names = [str(m) for m in self._mutator_probs.keys()]
+            mutator_probs_dict = {str(mut): prob for mut, prob in self._mutator_probs.items()}
+    
+            chosen_mutator_name = self.llm_policy.pick_mutator(
+                mod=leaf.schedule.mod,
+                available_mutators=possible_mutator_names,
+                historical_perf=historical_perf,
+                available_mutator_probs=mutator_probs_dict,
+            )
+    
+            if chosen_mutator_name is not None:
+                logger.warning("LLM returned mutator name: '%s'", chosen_mutator_name)
+                # Map back to actual Mutator object
+                chosen_mutator = None
+                for mut, _prob in self._mutator_probs.items():
+                    if str(mut) == chosen_mutator_name:
+                        chosen_mutator = mut
+                        break
+                    
+                if chosen_mutator is None:
+                    logger.warning("LLM mutator name '%s' did not match any known mutator. Fallback to random.", chosen_mutator_name)
+                    # Fallback if an invalid mutator name was given
+                    chosen_mutator = self._pick_random_mutator(rand_state)
+    
+                new_sch = self._apply_mutator_with_retry(leaf.schedule, chosen_mutator, rand_state)
+                if not new_sch:
+                    # Fallback or error handling
+                    new_sch = self._try_mcts_mutation(leaf.schedule, rand_state)
+                # We used the LLM, so decrement budget
+                self.llm_budget -= 1
+                logger.warning("LLM budget decremented. Remaining: %d", self.llm_budget)
+            else:
+                # LLM didn't produce a valid mutator => fallback
+                new_sch = self._try_mcts_mutation(leaf.schedule, rand_state)
+    
+            # -------------------------------------------------------------------------
+            # 6) If expansion failed, return None
+            # -------------------------------------------------------------------------
+            if not new_sch:
+                logger.warning("Failed to create a new schedule from chosen mutator. Expansion returning None.")
+                return None
+    
+            # -------------------------------------------------------------------------
+            # 7) Create and return the child node
+            # -------------------------------------------------------------------------
+            child = MCTSNode(schedule=new_sch, parent=leaf, depth=leaf.depth + 1)
+            leaf.children.append(child)
+            logger.warning(
+                "Successfully expanded leaf using %s approach. New child node at depth %d.",
+                "LLM-based" if chosen_mutator_name else "random",
+                child.depth
+            )
+            return child
+
+    
+#        def _expand(self, leaf: MCTSNode, rand_state: int) -> Optional[MCTSNode]:
+#        """
+#        Expand a leaf node in MCTS.
+#
+#        If LLM is available and enabled:
+#          1) Predict the cost-model score for the current schedule (leaf),
+#             and also gather historical performance from the parent and
+#             grandparent schedules.
+#          2) Pass these details to the LLM to pick a best mutator:
+#             - Current schedule's IR, trace, predicted score
+#             - Immediate parent's IR, trace, predicted score
+#             - Grandparent's IR, trace, predicted score
+#          3) If the LLM fails or returns an invalid mutator, fallback
+#             to random expansion. Otherwise, use the chosen mutator.
+#
+#        If LLM is not used for any reason (budget, usage disabled, etc.):
+#          - Revert to the original random-based expansion.
+#
+#        Returns the newly created child node if expansion succeeds, otherwise None.
+#        """
+#
+#        # -------------------------------------------------------------------------
+#        # 1) Early exit checks
+#        # -------------------------------------------------------------------------
+#        if self.mcts_max_depth is not None and leaf.depth >= self.mcts_max_depth:
+#            return None
+#        if leaf.schedule is None:
+#            return None
+#
+#        # -------------------------------------------------------------------------
+#        # 2) Early determination of LLM usage
+#        # -------------------------------------------------------------------------
+#        can_use_llm = (
+#            self.use_llm
+#            and self.llm_policy is not None
+#            and self.llm_budget > 0
+#            and (3<= leaf.depth <= 5)
+#            # and (3<= leaf.depth <= 5 or len(leaf.children) == 0)
+#        )
+#
+#        # -------------------------------------------------------------------------
+#        # 3) If we CANNOT use the LLM, do the original approach (random).
+#        # -------------------------------------------------------------------------
+#        if not can_use_llm:
+#            logger.warning("Not using LLM (either disabled, no budget, or depth/children constraints). Using random mutator.")
+#            new_sch = self._try_mcts_mutation(leaf.schedule, rand_state)
+#            if not new_sch:
+#                logger.warning("new_sch is none at line 478.")
+#                return None
+#            child = MCTSNode(schedule=new_sch, parent=leaf, depth=leaf.depth + 1)
+#            leaf.children.append(child)
+#            return child
+#
+#        # -------------------------------------------------------------------------
+#        # 4) If we CAN use the LLM => gather historical info, call LLM, etc.
+#        #    (Same logic as your existing LLM code)
+#        # -------------------------------------------------------------------------
+
 
     def _simulate_node(self, node: MCTSNode, rand_state: int) -> float:
         """
@@ -492,25 +690,37 @@ class MCTSTuner:
             cur_depth += 1
             mut = self._pick_random_mutator(rand_state)
             if mut is None:
+                logger.warning("[_rollout] No mutator found (mut is None). Breaking from rollout loop.")
                 break
             try:
                 mutated_trace = mut.apply(new_sch.trace)
             except (InvalidScheduleError, tvm.TVMError):
                 mutated_trace = None
             if mutated_trace is None:
+                logger.warning("[_rollout] mutated_trace is None after apply(). Stopping mutations.")
                 break
             maybe_new = self._replay_schedule(mutated_trace, rand_state)
             if maybe_new is None:
+                logger.warning("[_rollout] Replaying the mutated trace returned None. Stopping mutations.")
                 break
             new_sch = maybe_new
+            logger.warning(
+                f"[_rollout] Successfully replayed mutated trace. Now at rollout depth={cur_depth}."
+            )
 
         # 3) cost-model predict (score)
         if not self._cost_model or not self._database:
+            logger.warning(
+                f"[_rollout] No cost_model or no database found. Returning random fallback score."
+            )
             return random.random()  # fallback random
         arg_info = ArgInfo.from_entry_func(new_sch.mod, remove_preproc=True)
         candidate = MeasureCandidate(new_sch, arg_info)
         preds = self._cost_model.predict(self._ctx, [candidate])
         if preds:
+            logger.warning(
+                f"[_rollout] Final cost-model prediction. Returning this from rollout."
+            )
             return max(0.0, preds[0])
         return 0.0
 
@@ -670,6 +880,54 @@ class MCTSTuner:
                     if wl not in self._seen_workloads:
                         self._seen_workloads.add(wl)
                         return child_sch
+        return None
+
+    def _apply_mutator_with_retry(
+        self,
+        parent_sch: tvm.tir.Schedule,
+        chosen_mutator: Mutator,
+        rand_state: int
+    ) -> Optional[tvm.tir.Schedule]:
+        """
+        Attempt multiple times to produce a new schedule from `parent_sch`
+        by applying `chosen_mutator`.
+        
+        - Retries up to self.genetic_max_fail_count.
+        - Uses replay to ensure correctness.
+        - Skips workloads already encountered in self._seen_workloads.
+    
+        Returns the resulting Schedule if successful, otherwise None.
+        """
+        attempts = 0
+        while attempts <= self.genetic_max_fail_count:
+            attempts += 1
+    
+            # Track total attempts for debugging or logging
+            self._mutator_failure_count["total"] += 1
+    
+            # Attempt to apply the mutator
+            try:
+                new_trace = chosen_mutator.apply(parent_sch.trace)
+            except (InvalidScheduleError, tvm.TVMError):
+                new_trace = None
+    
+            if new_trace is None:
+                # If mutator application failed, increment its specific fail counter
+                self._mutator_failure_count[chosen_mutator] = (
+                    self._mutator_failure_count.get(chosen_mutator, 0) + 1
+                )
+            else:
+                # Replay the resulting trace to build a valid schedule
+                child_sch = self._replay_schedule(new_trace, rand_state)
+                if child_sch is not None and self._database:
+                    # Commit the workload and check if it's new
+                    wl = self._database.commit_workload(child_sch.mod)
+                    if wl not in self._seen_workloads:
+                        # Mark this workload as seen and return the schedule
+                        self._seen_workloads.add(wl)
+                        return child_sch
+    
+        # If all attempts fail or all schedules are duplicates, return None
         return None
 
     # -------------------------------------------------------------------------
@@ -1279,6 +1537,11 @@ class MCTSSearchPyFull(PySearchStrategy):
             cost_model=cost_model,
             database=database,
             workload_key=None,
+            use_llm=True,
+            llm_budget=1,
+            llm_policy=LLMGuidancePolicy(
+            model_name="gpt-4o-mini",
+            verbose=True),
         )
 
         # build MCTSTuningState
