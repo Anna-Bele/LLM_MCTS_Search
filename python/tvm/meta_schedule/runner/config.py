@@ -49,7 +49,7 @@ class EvaluatorConfig(NamedTuple):
     """
 
     number: int = 3
-    repeat: int = 1
+    repeat: int = 5
     min_repeat_ms: int = 100
     enable_cpu_cache_flush: bool = False
 

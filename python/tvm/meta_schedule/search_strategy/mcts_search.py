@@ -200,8 +200,8 @@ class MCTSTuner:
         cost_model: Optional["CostModel"],
         database: Optional["Database"],
         workload_key: Optional[Workload],
-        use_llm: bool = False,
-        llm_budget: int = 1,
+        use_llm: bool,
+        llm_budget: int,
         llm_policy: Optional["LLMGuidancePolicy"] = None,
     ):
         self.population_size = population_size
@@ -230,6 +230,8 @@ class MCTSTuner:
         self._cost_model = cost_model
         self._database = database
         self._workload_key = workload_key
+
+        self._workload_cache: Dict[int, Workload] = {}
 
         # track how many times a mutator fails
         self._mutator_failure_count: Dict[object, int] = {"total": 0}
@@ -368,9 +370,10 @@ class MCTSTuner:
         heap = _SizedMinHeap(size_limit=dynamic_pop_size)
         preds = self._predict_normalized_score(pop_schedules)
         for sch, pred_score in zip(pop_schedules, preds):
-            wl = None
-            if self._database:
-                wl = self._database.commit_workload(sch.mod)
+            # wl = None
+            # if self._database:
+            #     wl = self._database.commit_workload(sch.mod)
+            wl = self._commit_workload_cached(sch)
             measured_flag = (wl is not None) and (wl in self._measured_workloads)
             # If it's already measured, skip it from the top-K ranking
             if measured_flag:
@@ -392,21 +395,66 @@ class MCTSTuner:
     # -------------------------------------------------------------------------
     # MCTS steps: selection, expansion, simulation, backprop
     # -------------------------------------------------------------------------
+#    def _select(self, node: MCTSNode) -> Optional[MCTSNode]:
+#        """
+#        Select a node for expansion or simulation using UCB-based traversal.
+#    
+#        We descend from `node` (the root) until we find:
+#          1) A node that is unvisited (visits==0), OR
+#          2) A node that is not fully expanded (has fewer than 2 children).
+#    
+#        If a node has exactly 2 children and all are visited, we use UCB to pick
+#        one of the children and continue. We stop when we find a node that meets
+#        (1) or (2). This is the standard MCTS partial-expansion approach.
+#        """
+#        current = node
+#        while True:
+#            if current.parent is None:                         # root sentinel
+#                unvisited = [c for c in current.children if c.visits == 0]
+#                if unvisited:
+#                    current = unvisited[0]                     # depth 1 node
+#                else:
+#                    current = self._select_by_ucb(current)     # depth 1 node
+#                # loop again ← the new *current* is a real node
+#                continue    
+#
+#            # If current node is never visited, return it immediately
+#            if current.visits == 0:
+#                return current
+#    
+#            # If current node is not fully expanded (fewer than 2 children), return it
+#            if len(current.children) < 2:
+#                return current
+#    
+#            # If it is fully expanded, check for an unvisited child
+#            unvisited_children = [child for child in current.children if child.visits == 0]
+#            if unvisited_children:
+#                # Return the first unvisited child
+#                return unvisited_children[0]
+#    
+#            # Otherwise, all children are visited; pick one child via UCB
+#            next_child = self._select_by_ucb(current)
+#            if next_child is None:
+#                # If we cannot pick any child by UCB, just return None
+#                return None
+#    
+#            # Descend deeper
+#            current = next_child
     def _select(self, node: MCTSNode) -> Optional[MCTSNode]:
-        """
-        Select a leaf node by descending the tree using a UCB1 policy.
-        """
-        current = node
-        while True:
-            if not current.children:
-                return current
-            unvisited = [ch for ch in current.children if ch.visits == 0]
-            if unvisited:
-                return unvisited[0]
-            next_child = self._select_by_ucb(current)
-            if next_child is None:
-                return None
-            current = next_child
+         """
+         Select a leaf node by descending the tree using a UCB1 policy.
+         """
+         current = node
+         while True:
+             if not current.children:
+                 return current
+             unvisited = [ch for ch in current.children if ch.visits == 0]
+             if unvisited:
+                 return unvisited[0]
+             next_child = self._select_by_ucb(current)
+             if next_child is None:
+                 return None
+             current = next_child
 
     def _select_by_ucb(self, node: MCTSNode) -> Optional[MCTSNode]:
         """
@@ -429,9 +477,11 @@ class MCTSTuner:
 
     def _expand(self, leaf: MCTSNode, rand_state: int) -> Optional[MCTSNode]:
         """
-        Expand a leaf node by applying one random mutation to its schedule,
+        Expand a leaf node by applying multiple random mutations to its schedule,
         if within max_depth.
         """
+        if len(leaf.children) >= 2:
+            return None
         if self.mcts_max_depth is not None and leaf.depth >= self.mcts_max_depth:
             return None
         if leaf.schedule is None:
@@ -518,47 +568,57 @@ class MCTSTuner:
             # -------------------------------------------------------------------------
             # 5) Call the LLM to pick the mutator
             # -------------------------------------------------------------------------
-            logger.warning("Invoking LLM policy to pick a mutator.")
+            logger.warning("Invoking LLM policy to pick a sequence of mutators.")
             possible_mutator_names = [str(m) for m in self._mutator_probs.keys()]
             mutator_probs_dict = {str(mut): prob for mut, prob in self._mutator_probs.items()}
     
-            chosen_mutator_name = self.llm_policy.pick_mutator(
+            chosen_mutator_names = self.llm_policy.pick_mutators(
                 mod=leaf.schedule.mod,
                 available_mutators=possible_mutator_names,
                 historical_perf=historical_perf,
                 available_mutator_probs=mutator_probs_dict,
             )
     
-            if chosen_mutator_name is not None:
-                logger.warning("LLM returned mutator name: '%s'", chosen_mutator_name)
-                # Map back to actual Mutator object
-                chosen_mutator = None
-                for mut, _prob in self._mutator_probs.items():
-                    if str(mut) == chosen_mutator_name:
-                        chosen_mutator = mut
+            if chosen_mutator_names is not None and len(chosen_mutator_names) > 0:
+                logger.warning("LLM returned mutator names: '%s'", chosen_mutator_names)
+                # We'll apply the mutators in sequence to produce one final new_sch.
+                temp_sch = leaf.schedule
+                for name in chosen_mutator_names:
+                    # 1) Map back to an actual Mutator object
+                    chosen_mutator = None
+                    for mut, _prob in self._mutator_probs.items():
+                        if str(mut) == name:
+                            chosen_mutator = mut
+                            break
+                        
+                    if chosen_mutator is None:
+                        logger.warning(
+                            "LLM mutator name '%s' did not match any known mutator. Fallback to random for this step.",
+                            name
+                        )
+                        chosen_mutator = self._pick_random_mutator(rand_state)
+
+                    # 2) Apply it to temp_sch
+                    maybe_new = self._apply_mutator_with_retry(temp_sch, chosen_mutator, rand_state)
+                    if maybe_new is None:
+                        logger.warning("Failed applying mutator '%s'. Will not continue sequence.", name)
                         break
-                    
-                if chosen_mutator is None:
-                    logger.warning("LLM mutator name '%s' did not match any known mutator. Fallback to random.", chosen_mutator_name)
-                    # Fallback if an invalid mutator name was given
-                    chosen_mutator = self._pick_random_mutator(rand_state)
-    
-                new_sch = self._apply_mutator_with_retry(leaf.schedule, chosen_mutator, rand_state)
-                if not new_sch:
-                    # Fallback or error handling
-                    new_sch = self._try_mcts_mutation(leaf.schedule, rand_state)
+                    temp_sch = maybe_new
+
+                new_sch = temp_sch
                 # We used the LLM, so decrement budget
                 self.llm_budget -= 1
                 logger.warning("LLM budget decremented. Remaining: %d", self.llm_budget)
             else:
-                # LLM didn't produce a valid mutator => fallback
+                # LLM didn't produce a valid mutator list => fallback to one random mutation
+                logger.warning("LLM did not produce a valid mutator list => fallback to a random single mutation.")
                 new_sch = self._try_mcts_mutation(leaf.schedule, rand_state)
     
             # -------------------------------------------------------------------------
             # 6) If expansion failed, return None
             # -------------------------------------------------------------------------
             if not new_sch:
-                logger.warning("Failed to create a new schedule from chosen mutator. Expansion returning None.")
+                logger.warning("Failed to create a new schedule from chosen mutators. Expansion returning None.")
                 return None
     
             # -------------------------------------------------------------------------
@@ -568,69 +628,10 @@ class MCTSTuner:
             leaf.children.append(child)
             logger.warning(
                 "Successfully expanded leaf using %s approach. New child node at depth %d.",
-                "LLM-based" if chosen_mutator_name else "random",
+                "LLM-based" if chosen_mutator_names else "random",
                 child.depth
             )
             return child
-
-    
-#        def _expand(self, leaf: MCTSNode, rand_state: int) -> Optional[MCTSNode]:
-#        """
-#        Expand a leaf node in MCTS.
-#
-#        If LLM is available and enabled:
-#          1) Predict the cost-model score for the current schedule (leaf),
-#             and also gather historical performance from the parent and
-#             grandparent schedules.
-#          2) Pass these details to the LLM to pick a best mutator:
-#             - Current schedule's IR, trace, predicted score
-#             - Immediate parent's IR, trace, predicted score
-#             - Grandparent's IR, trace, predicted score
-#          3) If the LLM fails or returns an invalid mutator, fallback
-#             to random expansion. Otherwise, use the chosen mutator.
-#
-#        If LLM is not used for any reason (budget, usage disabled, etc.):
-#          - Revert to the original random-based expansion.
-#
-#        Returns the newly created child node if expansion succeeds, otherwise None.
-#        """
-#
-#        # -------------------------------------------------------------------------
-#        # 1) Early exit checks
-#        # -------------------------------------------------------------------------
-#        if self.mcts_max_depth is not None and leaf.depth >= self.mcts_max_depth:
-#            return None
-#        if leaf.schedule is None:
-#            return None
-#
-#        # -------------------------------------------------------------------------
-#        # 2) Early determination of LLM usage
-#        # -------------------------------------------------------------------------
-#        can_use_llm = (
-#            self.use_llm
-#            and self.llm_policy is not None
-#            and self.llm_budget > 0
-#            and (3<= leaf.depth <= 5)
-#            # and (3<= leaf.depth <= 5 or len(leaf.children) == 0)
-#        )
-#
-#        # -------------------------------------------------------------------------
-#        # 3) If we CANNOT use the LLM, do the original approach (random).
-#        # -------------------------------------------------------------------------
-#        if not can_use_llm:
-#            logger.warning("Not using LLM (either disabled, no budget, or depth/children constraints). Using random mutator.")
-#            new_sch = self._try_mcts_mutation(leaf.schedule, rand_state)
-#            if not new_sch:
-#                logger.warning("new_sch is none at line 478.")
-#                return None
-#            child = MCTSNode(schedule=new_sch, parent=leaf, depth=leaf.depth + 1)
-#            leaf.children.append(child)
-#            return child
-#
-#        # -------------------------------------------------------------------------
-#        # 4) If we CAN use the LLM => gather historical info, call LLM, etc.
-#        #    (Same logic as your existing LLM code)
-#        # -------------------------------------------------------------------------
 
 
     def _simulate_node(self, node: MCTSNode, rand_state: int) -> float:
@@ -737,8 +738,9 @@ class MCTSTuner:
             nd = stack.pop()
             if nd.schedule is not None and not nd.children:
                 wl = None
-                if self._database:
-                    wl = self._database.commit_workload(nd.schedule.mod)
+                wl = self._commit_workload_cached(nd.schedule)
+                # if self._database:
+                #     wl = self._database.commit_workload(nd.schedule.mod)
                 if wl not in self._measured_workloads:
                     leaves.append(nd)
             else:
@@ -860,7 +862,8 @@ class MCTSTuner:
                 # fallback: just replay parent's trace if no mutators
                 child_sch = self._replay_schedule(parent_sch.trace, rand_state)
                 if child_sch is not None and self._database:
-                    wl = self._database.commit_workload(child_sch.mod)
+                    wl = self._commit_workload_cached(child_sch)
+                    # wl = self._database.commit_workload(child_sch.mod)
                     if wl not in self._seen_workloads:
                         self._seen_workloads.add(wl)
                         return child_sch
@@ -876,7 +879,8 @@ class MCTSTuner:
             else:
                 child_sch = self._replay_schedule(new_trace, rand_state)
                 if child_sch is not None and self._database:
-                    wl = self._database.commit_workload(child_sch.mod)
+                    wl = self._commit_workload_cached(child_sch)
+                    # wl = self._database.commit_workload(child_sch.mod)
                     if wl not in self._seen_workloads:
                         self._seen_workloads.add(wl)
                         return child_sch
@@ -921,7 +925,8 @@ class MCTSTuner:
                 child_sch = self._replay_schedule(new_trace, rand_state)
                 if child_sch is not None and self._database:
                     # Commit the workload and check if it's new
-                    wl = self._database.commit_workload(child_sch.mod)
+                    wl = self._commit_workload_cached(child_sch)
+                    # wl = self._database.commit_workload(child_sch.mod)
                     if wl not in self._seen_workloads:
                         # Mark this workload as seen and return the schedule
                         self._seen_workloads.add(wl)
@@ -929,6 +934,58 @@ class MCTSTuner:
     
         # If all attempts fail or all schedules are duplicates, return None
         return None
+    
+    def _get_dynamic_ucb_constant(self) -> float:
+        """
+        Compute a globally decaying exploration constant based on self._search_state.trial_count.
+        For simplicity, we'll do an exponential decay schedule.
+        """
+
+        # 1) The base constant from the constructor
+        c0 = self.mcts_ucb_constant
+
+        # 2) Decide on a decay factor and scale
+        #    e.g. alpha=0.98 means each 'scaling' trials we multiply c by 0.98
+        alpha = 0.99
+        scaling = 150.0  # tune this based on how many trials you expect
+
+        # 3) Query how many schedules have been actually measured so far
+        current_trials = 0
+        if self._search_state is not None:
+            current_trials = self._search_state.trial_count
+
+        # 4) Compute exponent
+        exponent = float(current_trials) / scaling
+
+        # 5) Final decayed c
+        c_dynamic = c0 * (alpha ** exponent)
+
+        # Optionally log for debugging
+        if self.verbose >= 2:
+            logger.debug(
+                f"[_get_dynamic_ucb_constant] trial_count={current_trials}, c_dynamic={c_dynamic:.4f}"
+            )
+
+        return c_dynamic
+
+
+    def _commit_workload_cached(self, sch: Schedule) -> Optional[Workload]:
+        """
+        Return the Workload handle for `sch.mod`, committing it to the
+        database at most once (fast path O(1) after the first call).
+        """
+        if self._database is None:
+            return None
+        wl = getattr(sch, "_cached_wl", None)
+        if wl is not None:
+            return wl
+        shash = tvm.ir.structural_hash(sch.mod)
+        wl = self._workload_cache.get(shash)
+        if wl is None:
+            wl = self._database.commit_workload(sch.mod)
+            self._workload_cache[shash] = wl
+        sch._cached_wl = wl
+        return wl
 
     # -------------------------------------------------------------------------
     # Cost model scoring
@@ -1273,7 +1330,8 @@ class MCTSTuningState:
 
         # update sets
         for (sch, measured_flag) in combined:
-            wl = self.database.commit_workload(sch.mod)
+            wl = self.tuner._commit_workload_cached(sch)
+            # wl = self.database.commit_workload(sch.mod)
             self.seen_workloads.add(wl)
             if measured_flag:
                 self.measured_workloads.add(wl)
@@ -1291,7 +1349,8 @@ class MCTSTuningState:
         for rec in top_records:
             sch = self._replay_schedule(rec.trace)
             if sch is not None:
-                wl = self.database.commit_workload(sch.mod)
+                wl = self.tuner._commit_workload_cached(sch)
+                # wl = self.database.commit_workload(sch.mod)
                 if wl not in self.seen_workloads:
                     out.append(sch)
         return out
@@ -1339,7 +1398,8 @@ class MCTSTuningState:
             base_sch = self.design_spaces[idx]
             sch = self._replay_schedule(base_sch.trace)
             if sch is not None:
-                wl = self.database.commit_workload(sch.mod)
+                wl = self.tuner._commit_workload_cached(sch)
+                # wl = self.database.commit_workload(sch.mod)
                 if wl not in self.seen_workloads:
                     out.append(sch)
                     self.seen_workloads.add(wl)
@@ -1421,9 +1481,11 @@ class MCTSSearchPyFull(PySearchStrategy):
         verbose: int = 2,
         # MCTS-specific:
         mcts_ucb_constant: float = 1.41,
-        mcts_max_depth: Optional[int] = 200,
+        mcts_max_depth: Optional[int] = 500,
         mcts_num_threads: int = 1,
         mcts_num_rollouts_per_expansion: int = 1,
+        use_llm: bool = False,
+        llm_budget: int = 1,
     ) -> None:
         super().__init__()
         self.population_size = population_size
@@ -1444,6 +1506,9 @@ class MCTSSearchPyFull(PySearchStrategy):
         self.mcts_max_depth = mcts_max_depth
         self.mcts_num_threads = mcts_num_threads
         self.mcts_num_rollouts_per_expansion = mcts_num_rollouts_per_expansion
+
+        self.use_llm = use_llm
+        self.llm_budget = llm_budget
 
         self._ctx: Optional["TuneContext"] = None
         self._postprocs: List[Postproc] = []
@@ -1537,8 +1602,8 @@ class MCTSSearchPyFull(PySearchStrategy):
             cost_model=cost_model,
             database=database,
             workload_key=None,
-            use_llm=True,
-            llm_budget=1,
+            use_llm=self.use_llm,
+            llm_budget=self.llm_budget,
             llm_policy=LLMGuidancePolicy(
             model_name="gpt-4o-mini",
             verbose=True),
@@ -1616,6 +1681,8 @@ class MCTSSearchPyFull(PySearchStrategy):
             mcts_max_depth=self.mcts_max_depth,
             mcts_num_threads=self.mcts_num_threads,
             mcts_num_rollouts_per_expansion=self.mcts_num_rollouts_per_expansion,
+            use_llm=self.use_llm,
+            llm_budget=self.llm_budget,
         )
 
 
