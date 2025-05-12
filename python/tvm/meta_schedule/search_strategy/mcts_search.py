@@ -253,6 +253,7 @@ class MCTSTuner:
     # -------------------------------------------------------------------------
     # Main exploration entrypoint
     # -------------------------------------------------------------------------
+
     def explore(
         self,
         mcts_root: MCTSNode,
@@ -262,9 +263,9 @@ class MCTSTuner:
     ) -> List[Tuple[tvm.tir.Schedule, bool]]:
         """
         Perform expansions (self.genetic_num_iters times) from mcts_root,
-        in each iteration try to generate up to `dynamic_pop_size` new children.
-        Then gather all nodes, rank them, and return the new top-K unmeasured 
-        schedules (with measured-flag).
+        in each iteration generate up to `dynamic_pop_size` new children.
+        Then, gather all nodes in the tree, returning them as (schedule, measured_flag).
+        We'll let generate_measure_candidates() do the actual eps-greedy picking.
         """
         logger.warning(
             "[DEBUG] explore() called with dynamic_pop_size=%d, genetic_num_iters=%d",
@@ -351,110 +352,231 @@ class MCTSTuner:
             total_expansions, self.genetic_num_iters
         )
 
-        # Now we gather *all* nodes in the MCTS tree and pick top-K 
-        # based on cost-model predictions, skipping measured schedules
+        # Now we gather *all* nodes in the MCTS tree
         all_nodes = self._gather_tree_schedules(mcts_root)
         logger.warning(
             "explore(): Gathered %d total nodes (with schedules) from the MCTS tree.",
             len(all_nodes)
         )
 
-        pop_schedules = [node.schedule for node in all_nodes if node.schedule is not None]
-        logger.warning(
-            "explore(): Of those nodes, %d have a non-None schedule.", len(pop_schedules)
-        )
+        # Build a new "population" of (schedule, measured_flag) for all these nodes
+        new_population = []
+        for node in all_nodes:
+            if node.schedule is not None:
+                wl = self._commit_workload_cached(node.schedule)
+                measured_flag = (wl is not None) and (wl in self._measured_workloads)
+                new_population.append((node.schedule, measured_flag))
 
-        # Cost-model-based ranking:
-        #   - skip measured schedules
-        #   - keep top dynamic_pop_size by predicted score
-        heap = _SizedMinHeap(size_limit=dynamic_pop_size)
-        preds = self._predict_normalized_score(pop_schedules)
-        for sch, pred_score in zip(pop_schedules, preds):
-            # wl = None
-            # if self._database:
-            #     wl = self._database.commit_workload(sch.mod)
-            wl = self._commit_workload_cached(sch)
-            measured_flag = (wl is not None) and (wl in self._measured_workloads)
-            # If it's already measured, skip it from the top-K ranking
-            if measured_flag:
-                continue
-            heap.push(sch, pred_score, measured_flag)
-
-        # Build the new population from the top items
-        best_items = heap.items_descending()
-        new_population = [(sch, meas) for (score, sch, meas) in best_items]
         logger.warning(
-            "explore(): new_population size=%d after cost-model-based ranking (top-K).",
+            "explore(): Returning a new population of size=%d (some may be measured).",
             len(new_population)
         )
-
         return new_population
+
+    
+#    def explore(
+#        self,
+#        mcts_root: MCTSNode,
+#        population: List[Tuple[tvm.tir.Schedule, bool]],
+#        dynamic_pop_size: int,
+#        rand_state: int,
+#    ) -> List[Tuple[tvm.tir.Schedule, bool]]:
+#        """
+#        Perform expansions (self.genetic_num_iters times) from mcts_root,
+#        in each iteration try to generate up to `dynamic_pop_size` new children.
+#        Then gather all nodes, rank them, and return the new top-K unmeasured 
+#        schedules (with measured-flag).
+#        """
+#        logger.warning(
+#            "[DEBUG] explore() called with dynamic_pop_size=%d, genetic_num_iters=%d",
+#            dynamic_pop_size,
+#            self.genetic_num_iters
+#        )
+#
+#        # If our root is somehow empty, just return the old population
+#        if not mcts_root or not mcts_root.children:
+#            logger.warning("explore(): Root is empty or has no children. Returning existing population.")
+#            return population
+#
+#        total_expansions = 0  # track total expansions across all generations
+#
+#        # For each "generation"
+#        for gen_iter in range(self.genetic_num_iters):
+#            new_children_count = 0
+#            fail_count = 0
+#
+#            logger.warning("explore(): Starting generation %d ...", gen_iter)
+#
+#            while new_children_count < dynamic_pop_size:
+#                # 1) UCB selection
+#                leaf = self._select(mcts_root)
+#                if leaf is None:
+#                    # means we couldn't pick a leaf at all
+#                    logger.warning(
+#                        "explore(): MCTS: Leaf is None in selection => break expansions."
+#                    )
+#                    break
+#
+#                logger.warning(
+#                    "explore(): [gen=%d] Selected leaf node at depth=%d with %d children",
+#                    gen_iter, leaf.depth, len(leaf.children)
+#                )
+#
+#                # 2) Expand
+#                new_node = self._expand(leaf, rand_state)
+#                if new_node is None:
+#                    fail_count += 1
+#                    logger.warning(
+#                        "explore(): Failed to expand leaf at depth=%d (fail_count=%d)",
+#                        leaf.depth, fail_count
+#                    )
+#                    if fail_count >= self.genetic_max_fail_count:
+#                        logger.warning(
+#                            "explore(): Too many expansion failures => break expansions."
+#                        )
+#                        break
+#                    # otherwise keep trying
+#                    continue
+#
+#                logger.warning(
+#                    "explore(): Successfully expanded leaf at depth=%d => new node at depth=%d; "
+#                    "now leaf has %d children total",
+#                    leaf.depth, new_node.depth, len(leaf.children)
+#                )
+#
+#                # 3) Simulation
+#                value = self._simulate_node(new_node, rand_state)
+#                logger.warning(
+#                    "explore(): Simulation done for new node at depth=%d => value=%.4f",
+#                    new_node.depth, value
+#                )
+#
+#                # 4) Backprop
+#                self._backprop(new_node, value)
+#                logger.warning(
+#                    "explore(): Backprop done => node visits=%d, total_value=%.4f",
+#                    new_node.visits, new_node.total_value
+#                )
+#
+#                new_children_count += 1
+#                total_expansions += 1
+#
+#            logger.warning(
+#                "explore(): [gen=%d] expansions=%d, fail_count=%d so far in this generation",
+#                gen_iter, new_children_count, fail_count
+#            )
+#
+#        # Post-expansion summary
+#        logger.warning(
+#            "explore(): All expansions complete => total_expansions=%d across %d generations.",
+#            total_expansions, self.genetic_num_iters
+#        )
+#
+#        # Now we gather *all* nodes in the MCTS tree and pick top-K 
+#        # based on cost-model predictions, skipping measured schedules
+#        all_nodes = self._gather_tree_schedules(mcts_root)
+#        logger.warning(
+#            "explore(): Gathered %d total nodes (with schedules) from the MCTS tree.",
+#            len(all_nodes)
+#        )
+#
+#        pop_schedules = [node.schedule for node in all_nodes if node.schedule is not None]
+#        logger.warning(
+#            "explore(): Of those nodes, %d have a non-None schedule.", len(pop_schedules)
+#        )
+#
+#        # Cost-model-based ranking:
+#        #   - skip measured schedules
+#        #   - keep top dynamic_pop_size by predicted score
+#        heap = _SizedMinHeap(size_limit=dynamic_pop_size)
+#        preds = self._predict_normalized_score(pop_schedules)
+#        for sch, pred_score in zip(pop_schedules, preds):
+#            # wl = None
+#            # if self._database:
+#            #     wl = self._database.commit_workload(sch.mod)
+#            wl = self._commit_workload_cached(sch)
+#            measured_flag = (wl is not None) and (wl in self._measured_workloads)
+#            # If it's already measured, skip it from the top-K ranking
+#            if measured_flag:
+#                continue
+#            heap.push(sch, pred_score, measured_flag)
+#
+#        # Build the new population from the top items
+#        best_items = heap.items_descending()
+#        new_population = [(sch, meas) for (score, sch, meas) in best_items]
+#        logger.warning(
+#            "explore(): new_population size=%d after cost-model-based ranking (top-K).",
+#            len(new_population)
+#        )
+#
+#        return new_population
 
 
 
     # -------------------------------------------------------------------------
     # MCTS steps: selection, expansion, simulation, backprop
     # -------------------------------------------------------------------------
+    def _select(self, node: MCTSNode) -> Optional[MCTSNode]:
+        """
+        Select a node for expansion or simulation using UCB-based traversal.
+    
+        We descend from `node` (the root) until we find:
+          1) A node that is unvisited (visits==0), OR
+          2) A node that is not fully expanded (has fewer than 2 children).
+    
+        If a node has exactly 2 children and all are visited, we use UCB to pick
+        one of the children and continue. We stop when we find a node that meets
+        (1) or (2). This is the standard MCTS partial-expansion approach.
+        """
+        current = node
+        while True:
+            if current.parent is None:                         # root sentinel
+                unvisited = [c for c in current.children if c.visits == 0]
+                if unvisited:
+                    current = unvisited[0]                     # depth 1 node
+                else:
+                    current = self._select_by_ucb(current)     # depth 1 node
+                # loop again ← the new *current* is a real node
+                continue    
+
+            # If current node is never visited, return it immediately
+            if current.visits == 0:
+                return current
+    
+            # If current node is not fully expanded (fewer than 2 children), return it
+            if len(current.children) < 2:
+                return current
+    
+            # If it is fully expanded, check for an unvisited child
+            unvisited_children = [child for child in current.children if child.visits == 0]
+            if unvisited_children:
+                # Return the first unvisited child
+                return unvisited_children[0]
+    
+            # Otherwise, all children are visited; pick one child via UCB
+            next_child = self._select_by_ucb(current)
+            if next_child is None:
+                # If we cannot pick any child by UCB, just return None
+                return None
+    
+            # Descend deeper
+            current = next_child
+
 #    def _select(self, node: MCTSNode) -> Optional[MCTSNode]:
 #        """
-#        Select a node for expansion or simulation using UCB-based traversal.
-#    
-#        We descend from `node` (the root) until we find:
-#          1) A node that is unvisited (visits==0), OR
-#          2) A node that is not fully expanded (has fewer than 2 children).
-#    
-#        If a node has exactly 2 children and all are visited, we use UCB to pick
-#        one of the children and continue. We stop when we find a node that meets
-#        (1) or (2). This is the standard MCTS partial-expansion approach.
+#        Select a leaf node by descending the tree using a UCB1 policy.
 #        """
 #        current = node
 #        while True:
-#            if current.parent is None:                         # root sentinel
-#                unvisited = [c for c in current.children if c.visits == 0]
-#                if unvisited:
-#                    current = unvisited[0]                     # depth 1 node
-#                else:
-#                    current = self._select_by_ucb(current)     # depth 1 node
-#                # loop again ← the new *current* is a real node
-#                continue    
-#
-#            # If current node is never visited, return it immediately
-#            if current.visits == 0:
+#            if not current.children:
 #                return current
-#    
-#            # If current node is not fully expanded (fewer than 2 children), return it
-#            if len(current.children) < 2:
-#                return current
-#    
-#            # If it is fully expanded, check for an unvisited child
-#            unvisited_children = [child for child in current.children if child.visits == 0]
-#            if unvisited_children:
-#                # Return the first unvisited child
-#                return unvisited_children[0]
-#    
-#            # Otherwise, all children are visited; pick one child via UCB
+#            unvisited = [ch for ch in current.children if ch.visits == 0]
+#            if unvisited:
+#                return unvisited[0]
 #            next_child = self._select_by_ucb(current)
 #            if next_child is None:
-#                # If we cannot pick any child by UCB, just return None
 #                return None
-#    
-#            # Descend deeper
 #            current = next_child
-    def _select(self, node: MCTSNode) -> Optional[MCTSNode]:
-         """
-         Select a leaf node by descending the tree using a UCB1 policy.
-         """
-         current = node
-         while True:
-             if not current.children:
-                 return current
-             unvisited = [ch for ch in current.children if ch.visits == 0]
-             if unvisited:
-                 return unvisited[0]
-             next_child = self._select_by_ucb(current)
-             if next_child is None:
-                 return None
-             current = next_child
 
     def _select_by_ucb(self, node: MCTSNode) -> Optional[MCTSNode]:
         """
@@ -490,13 +612,16 @@ class MCTSTuner:
             self.use_llm
             and self.llm_policy is not None
             and self.llm_budget > 0
-            and (3<= leaf.depth <= 5)
+            and (2 <= leaf.depth)
+            # and (len(leaf.children) == 0)
+            # and (3<= leaf.depth <= 6 or 72 <= leaf.depth <= 76)
             # and (3<= leaf.depth <= 5 or len(leaf.children) == 0)
         )
         if not can_use_llm:
             logger.warning("Not using LLM (either disabled, no budget, or depth/children constraints). Using random mutator.")
             new_sch = self._try_mcts_mutation(leaf.schedule, rand_state)
             if not new_sch:
+                logger.warning("At line 625.")
                 return None
             child = MCTSNode(schedule=new_sch, parent=leaf, depth=leaf.depth + 1)
             leaf.children.append(child)
@@ -1093,10 +1218,110 @@ class MCTSTuningState:
     # -------------------------------------------------------------------------
     # The main method called by the strategy: generate_measure_candidates
     # -------------------------------------------------------------------------
+#    def generate_measure_candidates(self) -> Optional[List[MeasureCandidate]]:
+#        """
+#        Orchestrates MCTS expansions and picks unmeasured best schedules 
+#        as measure candidates (directly from explore()).
+#        """
+#        if self.tuner.verbose >= 1:
+#            logger.warning(
+#                "[DEBUG] Enter generate_measure_candidates: trial_count=%d, max_trials=%d",
+#                self.trial_count, self.max_trials
+#            )
+#
+#        if self.trial_count >= self.max_trials:
+#            return None
+#
+#        remaining = self.max_trials - self.trial_count
+#        batch_size = min(remaining, self.num_trials_per_iter)
+#        if batch_size <= 0:
+#            return None
+#
+#        # On first call, initialize root node & population
+#        if not self.used_init_population:
+#            init_pop = self._init_population()
+#            if not init_pop:
+#                return None
+#            self.mcts_root = MCTSNode(schedule=None, parent=None, depth=0)
+#            for (sch, is_measured) in init_pop:
+#                child = MCTSNode(schedule=sch, parent=self.mcts_root, depth=1)
+#                self.mcts_root.children.append(child)
+#            self.population = init_pop
+#            self.used_init_population = True
+#
+#            if self.tuner.verbose >= 1:
+#                logger.warning(
+#                    "generate_measure_candidates: MCTS: Initialized root with %d child schedules.",
+#                    len(init_pop)
+#                )
+#
+#        # Expand and get updated top-K unmeasured schedules
+#        self.population = self.tuner.explore(
+#            mcts_root=self.mcts_root,
+#            population=self.population,
+#            dynamic_pop_size=self.dynamic_pop_size,
+#            rand_state=self.rand_state,
+#        )
+#
+#        if not self.population:
+#            # no unmeasured => increment empty iters
+#            self.num_empty_iters += 1
+#            if self.tuner.verbose >= 1:
+#                logger.warning(
+#                    "generate_measure_candidates: MCTS: explore() returned empty => empty iters=%d",
+#                    self.num_empty_iters
+#                )
+#            if self.num_empty_iters >= self.tuner.num_empty_iters_before_early_stop:
+#                # early stop
+#                if self.tuner.verbose >= 1:
+#                    logger.warning("generate_measure_candidates: MCTS: Stopping early => repeated empty iters.")
+#                return None
+#            return None
+#
+#        # Build measure candidates from the top unmeasured schedules (up to batch_size)
+#        unmeasured_schedules = []
+#        for (sch, measured_flag) in self.population:
+#            if not measured_flag:
+#                unmeasured_schedules.append(sch)
+#
+#        if not unmeasured_schedules:
+#            # again, no unmeasured => empty iteration
+#            self.num_empty_iters += 1
+#            if self.tuner.verbose >= 1:
+#                logger.warning(
+#                    "generate_measure_candidates: MCTS: no unmeasured schedules => empty iters=%d",
+#                    self.num_empty_iters
+#                )
+#            if self.num_empty_iters >= self.tuner.num_empty_iters_before_early_stop:
+#                if self.tuner.verbose >= 1:
+#                    logger.warning("generate_measure_candidates: stopping early => repeated empty iters.")
+#                return None
+#            return None
+#
+#        # Truncate to the batch_size we want
+#        unmeasured_schedules = unmeasured_schedules[:batch_size]
+#
+#        measure_cands: List[MeasureCandidate] = []
+#        for sch in unmeasured_schedules:
+#            arg_info = ArgInfo.from_entry_func(sch.mod, remove_preproc=True)
+#            measure_cands.append(MeasureCandidate(sch, arg_info))
+#
+#        if self.tuner.verbose >= 1:
+#            logger.warning(
+#                "generate_measure_candidates: [DEBUG] MCTS => returning %d cands; trial_count=%d, "
+#                "batch_size_requested=%d, used_init_population=%s",
+#                len(measure_cands),
+#                self.trial_count,
+#                batch_size,
+#                str(self.used_init_population),
+#            )
+#        return measure_cands
+    
     def generate_measure_candidates(self) -> Optional[List[MeasureCandidate]]:
         """
-        Orchestrates MCTS expansions and picks unmeasured best schedules 
-        as measure candidates (directly from explore()).
+        Called by the MetaSchedule engine each round to get new schedules for measurement.
+        We'll call tuner.explore() to do expansions, then pick unmeasured schedules
+        with our eps-greedy approach.
         """
         if self.tuner.verbose >= 1:
             logger.warning(
@@ -1112,7 +1337,7 @@ class MCTSTuningState:
         if batch_size <= 0:
             return None
 
-        # On first call, initialize root node & population
+        # On first call, init population
         if not self.used_init_population:
             init_pop = self._init_population()
             if not init_pop:
@@ -1130,7 +1355,7 @@ class MCTSTuningState:
                     len(init_pop)
                 )
 
-        # Expand and get updated top-K unmeasured schedules
+        # 1) expansions => new population with all schedules
         self.population = self.tuner.explore(
             mcts_root=self.mcts_root,
             population=self.population,
@@ -1139,50 +1364,49 @@ class MCTSTuningState:
         )
 
         if not self.population:
-            # no unmeasured => increment empty iters
+            # No schedules => likely all measured or expansions failed
             self.num_empty_iters += 1
-            if self.tuner.verbose >= 1:
-                logger.warning(
-                    "generate_measure_candidates: MCTS: explore() returned empty => empty iters=%d",
-                    self.num_empty_iters
-                )
+            logger.warning(
+                "generate_measure_candidates: MCTS: explore() returned empty => empty iters=%d",
+                self.num_empty_iters
+            )
             if self.num_empty_iters >= self.tuner.num_empty_iters_before_early_stop:
-                # early stop
                 if self.tuner.verbose >= 1:
                     logger.warning("generate_measure_candidates: MCTS: Stopping early => repeated empty iters.")
                 return None
             return None
 
-        # Build measure candidates from the top unmeasured schedules (up to batch_size)
-        unmeasured_schedules = []
-        for (sch, measured_flag) in self.population:
-            if not measured_flag:
-                unmeasured_schedules.append(sch)
+        # 2) Eps-greedy pick up to batch_size unmeasured
+        logger.warning(
+            "generate_measure_candidates: MCTS: population size=%d before eps-greedy picking",
+            len(self.population)
+        )
 
-        if not unmeasured_schedules:
-            # again, no unmeasured => empty iteration
+        cands_sch = self._pick_unmeasured_eps_greedy(self.population, batch_size, self.rand_state)
+        if not cands_sch:
             self.num_empty_iters += 1
-            if self.tuner.verbose >= 1:
-                logger.warning(
-                    "generate_measure_candidates: MCTS: no unmeasured schedules => empty iters=%d",
-                    self.num_empty_iters
-                )
+            logger.warning(
+                "generate_measure_candidates: MCTS: no unmeasured schedules => empty iters=%d",
+                self.num_empty_iters
+            )
             if self.num_empty_iters >= self.tuner.num_empty_iters_before_early_stop:
                 if self.tuner.verbose >= 1:
                     logger.warning("generate_measure_candidates: stopping early => repeated empty iters.")
                 return None
             return None
 
-        # Truncate to the batch_size we want
-        unmeasured_schedules = unmeasured_schedules[:batch_size]
+        logger.warning(
+            "generate_measure_candidates: [DEBUG] Eps-greedy picked %d schedules for measurement (batch_size=%d).",
+            len(cands_sch), batch_size
+        )
 
+        # 3) Build measure candidates
         measure_cands: List[MeasureCandidate] = []
-        for sch in unmeasured_schedules:
+        for sch in cands_sch:
             arg_info = ArgInfo.from_entry_func(sch.mod, remove_preproc=True)
             measure_cands.append(MeasureCandidate(sch, arg_info))
 
-        if self.tuner.verbose >= 1:
-            logger.warning(
+        logger.warning(
                 "generate_measure_candidates: [DEBUG] MCTS => returning %d cands; trial_count=%d, "
                 "batch_size_requested=%d, used_init_population=%s",
                 len(measure_cands),
@@ -1191,6 +1415,7 @@ class MCTSTuningState:
                 str(self.used_init_population),
             )
         return measure_cands
+
 
     def notify_runner_results(
         self,
@@ -1408,6 +1633,79 @@ class MCTSTuningState:
             else:
                 fails += 1
         return out
+    
+    def _pick_unmeasured_eps_greedy(
+        self,
+        schedules_with_flags: List[Tuple[tvm.tir.Schedule, bool]],
+        total_needed: int,
+        rand_state: int
+    ) -> List[tvm.tir.Schedule]:
+        """
+        From `schedules_with_flags`, pick up to `total_needed` schedules that are unmeasured,
+        using an eps-greedy fraction from top cost-model and random from the remainder.
+        """
+
+        logger.warning(
+            "[DEBUG] _pick_unmeasured_eps_greedy called with total_needed=%d, eps_greedy=%.3f",
+            total_needed, 0.05
+        )
+
+        # 1) Collect unmeasured schedules
+        unmeasured = []
+        for (sch, measured_flag) in schedules_with_flags:
+            if not measured_flag:
+                unmeasured.append(sch)
+
+        logger.warning("[DEBUG] Found %d unmeasured schedules.", len(unmeasured))
+
+        if not unmeasured:
+            return []
+
+        # 2) Cost model scores => sort descending
+        preds = self.tuner._predict_normalized_score(unmeasured)
+        logger.warning("[DEBUG] Computed cost-model predictions for %d unmeasured schedules.", len(preds))
+
+        scored = list(zip(unmeasured, preds))
+        scored.sort(key=lambda x: x[1], reverse=True)
+
+        logger.warning(
+            "[DEBUG] Top schedule after sorting has predicted score=%.4f if the list is non-empty.",
+            scored[0][1] if scored else -1.0
+        )
+
+        # 3) Eps-greedy fraction
+        # e.g. if eps_greedy=0.05 => 5% random, 95% best
+        n_total = min(total_needed, len(scored))
+        n_rand = int(round(n_total * 0.05))
+        n_top = n_total - n_rand
+
+        logger.warning(
+            "[DEBUG] Eps-greedy selection: total_needed=%d => n_top=%d, n_rand=%d",
+            n_total, n_top, n_rand
+        )
+
+        top_part = scored[:n_top]
+        leftover = scored[n_top:]
+
+        random_schedules = []
+        if leftover and n_rand > 0:
+            # set seed if you want reproducible random picks
+            random.seed(rand_state)
+            n_rand = min(n_rand, len(leftover))
+            random_part = random.sample(leftover, n_rand)
+            random_schedules = [sch for (sch, _) in random_part]
+
+        top_schedules = [sch for (sch, _) in top_part]
+
+        combined = top_schedules + random_schedules
+        logger.warning(
+            "[DEBUG] _pick_unmeasured_eps_greedy => returning %d schedules => %d top + %d random",
+            len(combined), len(top_schedules), len(random_schedules)
+        )
+
+        return combined
+
+
 
     # -------------------------------------------------------------------------
     # Mark schedule measured

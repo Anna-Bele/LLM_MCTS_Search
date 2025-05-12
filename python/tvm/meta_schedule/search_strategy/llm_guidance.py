@@ -228,14 +228,15 @@ class LLMGuidancePolicy:
             "a sequence of transformations (the trace), and a predicted performance score "
             "from TVM's default XGBoost cost model.\n\n"
 
-            "We also provide you with a best-performing trace and IR from a previous run. "
+            "We also provide you with a best-performing trace and IR from a previous run of a matmul with dimensions (1, 16, 4096, 4096). "
             "Feel free to refer to them if they can guide you to propose better transformations.\n\n"
 
             "You are given:\n"
             " - The IRModule for the current schedule\n"
+            " - A best-performing trace & IR from a previous run of a matmul with dimensions (1, 16, 4096, 4096)\n"
             " - Historical performance info summarizing the current schedule, its parent, "
-            "   and grandparent schedules (their IR, traces, and predicted scores)\n"
-            " - A best-performing trace & IR from earlier runs\n"
+            "   and grandparent schedules (their IR, traces, and predicted scores (do not "
+            "   overly rely on predicted scores as they can be inaccurate sometimes))\n"
             " - A list of possible mutators (transformations) that can be applied next\n"
             " - Mutator probabilities from the internal policy, indicating how "
             "   likely each mutator is under normal random selection.\n\n"
@@ -244,12 +245,12 @@ class LLMGuidancePolicy:
             "For instance, 'meta_schedule.MutateTileSize(...)' might choose different tile sizes each time, "
             "so repeating it can explore a range of tiling configurations.\n\n"
 
-            "Please compare the IR, trace, predicted scores of these schedules and the best-performing artifacts to see what "
-            "changes might improve the predicted performance. Then propose a *sequence* of transformations "
+            "Please compare the IR, trace, predicted scores of these schedules and the best-performing trace and IR of a previous run of a matmul with dimensions (1, 16, 4096, 4096) to see what "
+            "changes might improve the current schedule performance. Then propose a *sequence* of transformations "
             "(one or more) from the provided list. Output your chain-of-thought reasoning as well as "
             "the final full mutator name list in the exact format:\n\n"
             "Reasoning: ...\n"
-            "Mutators: Fullname1, Fullname2, Fullname3, Fullname4, Fullname5, ...\n\n"
+            "Mutators: Fullname1, Fullname2, Fullname3, Fullname4, Fullname5, Fullname6, Fullname7, Fullname8, Fullname9, Fullname10...\n\n"
             "Only output them in a single final line labeled 'Mutators:'.\n"
             "This will allow MCTS to explore those transformations.\n"
 
@@ -272,11 +273,11 @@ class LLMGuidancePolicy:
             )
 
         user_msg += (
-            "=== Best-Performing Trace (from previous runs) ===\n"
+            "=== Best-Performing Trace (from a previous run of a matmul with dimensions (1, 16, 4096, 4096)) ===\n"
             f"{best_trace_str}\n\n"
         )
         user_msg += (
-            "=== Best-Performing IR (from previous runs) ===\n"
+            "=== Best-Performing IR (from a previous run of a matmul with dimensions (1, 16, 4096, 4096)) ===\n"
             f"```python\n{best_ir_str}\n```\n\n"
         )
 
@@ -304,10 +305,10 @@ class LLMGuidancePolicy:
             "of mutators (from the provided list) that you believe will improve performance. "
             "Remember: You can reuse the same mutator multiple times if that seems helpful. "
             "Use chain-of-thought reasoning to explain your logic step by step, and then "
-            "output the the recommended transformations (full mutator names) in a single line labeled 'Mutators: Fullname1, Fullname2, Fullname3, Fullname4, Fullname5...'.\n\n"
+            "output the the recommended transformations (full mutator names) in a single line labeled 'Mutators: Fullname1, Fullname2, Fullname3, Fullname4, Fullname5, Fullname6, Fullname7, Fullname8, Fullname9, Fullname10...'.\n\n"
             "Example:\n\n"
             "Reasoning: This schedule still has large loop extents, so I'd tile it twice differently, then unroll...\n"
-            "Mutator: meta_schedule....(...), meta_schedule....(...), meta_schedule....(...), meta_schedule....(...), meta_schedule....(...), ...\n"
+            "Mutators: meta_schedule....(...), meta_schedule....(...), meta_schedule....(...), meta_schedule....(...), meta_schedule....(...), ...\n"
             "IMPORTANT: If you choose one of the mutators, you MUST include the number in parentheses following the mutator."
             "If you omit the '(0x...)' part, your answer is invalid.\n\n"
         )
