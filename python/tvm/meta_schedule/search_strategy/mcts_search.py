@@ -830,9 +830,9 @@ class MCTSTuner:
                 logger.warning("[_rollout] Replaying the mutated trace returned None. Stopping mutations.")
                 break
             new_sch = maybe_new
-            logger.warning(
-                f"[_rollout] Successfully replayed mutated trace. Now at rollout depth={cur_depth}."
-            )
+            # logger.warning(
+            #     f"[_rollout] Successfully replayed mutated trace. Now at rollout depth={cur_depth}."
+            # )
 
         # 3) cost-model predict (score)
         if not self._cost_model or not self._database:
@@ -1903,7 +1903,7 @@ class MCTSSearchPyFull(PySearchStrategy):
             use_llm=self.use_llm,
             llm_budget=self.llm_budget,
             llm_policy=LLMGuidancePolicy(
-            model_name="gpt-4o-mini",
+            model_name="o3-mini",
             verbose=True),
         )
 
