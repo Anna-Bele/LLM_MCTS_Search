@@ -52,8 +52,8 @@ If you use the function tune_tir for tuning, pass llm_mcts_strategy as a paramet
 database = ms.tune_tir(
     mod=MyModule,
     target="llvm --num-cores=1",
-    max_trials_global=63,
-    num_trials_per_iter=3,
+    max_trials_global=64,
+    num_trials_per_iter=64,
     work_dir="./tune_tmp",
     strategy=llm_mcts_strategy,
 )
