@@ -15,50 +15,34 @@
 <!--- specific language governing permissions and limitations -->
 <!--- under the License. -->
 
-<img src=https://raw.githubusercontent.com/apache/tvm-site/main/images/logo/tvm-logo-small.png width=128/> Open Deep Learning Compiler Stack
-==============================================
-[Documentation](https://tvm.apache.org/docs) |
-[Contributors](CONTRIBUTORS.md) |
-[Community](https://tvm.apache.org/community) |
-[Release Notes](NEWS.md)
+# LLM MCTS Strategy
+In our project, we use TVM since it is an open source compiler stack for deep learning systems with [Apache-2.0](LICENSE) license. Detailed implementations of this project are included in the folder python/tvm/meta_schedule/search_strategy.
 
-Apache TVM is a compiler stack for deep learning systems. It is designed to close the gap between the
-productivity-focused deep learning frameworks and the performance- and efficiency-focused hardware backends.
-TVM works with deep learning frameworks to provide end-to-end compilation for different backends.
+To run this repo, follow these steps:
+1. Install TVM and configure the environment as detailed in TVM's documentation https://tvm.apache.org/docs/install/index.html
+2. Instead of using the default strategy, create the MCTS+LLM search
+strategy object by
 
-License
--------
-TVM is licensed under the [Apache-2.0](LICENSE) license.
+mcts_strategy = MCTSSearchPyFull(
+    population_size=3,
+    init_measured_ratio=0,
+    init_min_unmeasured=3,
+    max_fail_count=20,
+    genetic_num_iters=3,
+    genetic_mutate_prob=0.85,
+    genetic_max_fail_count=2,
+    num_empty_iters_before_early_stop=100,
+    max_stale_iters=60,
+    diversity_epsilon=1e-6,
+    max_stale_diversity_iters=30,
+    trace_commit=True,
+    mcts_ucb_constant=1.41,
+    mcts_max_depth=2000,
+    mcts_num_threads=1,
+    mcts_num_rollouts_per_expansion=1,
+    use_llm=True,
+    llm_budget=600,
+    llm_model_name="API_MODEL_NAME",
+)
 
-Getting Started
----------------
-Check out the [TVM Documentation](https://tvm.apache.org/docs/) site for installation instructions, tutorials, examples, and more.
-The [Getting Started with TVM](https://tvm.apache.org/docs/get_started/overview.html) tutorial is a great
-place to start.
-
-Contribute to TVM
------------------
-TVM adopts the Apache committer model. We aim to create an open-source project maintained and owned by the community.
-Check out the [Contributor Guide](https://tvm.apache.org/docs/contribute/).
-
-History and Acknowledgement
----------------------------
-TVM started as a research project for deep learning compilation.
-The first version of the project benefited a lot from the following projects:
-
-- [Halide](https://github.com/halide/Halide): Part of TVM's TIR and arithmetic simplification module
- originates from Halide. We also learned and adapted some parts of the lowering pipeline from Halide.
-- [Loopy](https://github.com/inducer/loopy): use of integer set analysis and its loop transformation primitives.
-- [Theano](https://github.com/Theano/Theano): the design inspiration of symbolic scan operator for recurrence.
-
-Since then, the project has gone through several rounds of redesigns.
-The current design is also drastically different from the initial design, following the
-development trend of the ML compiler community.
-
-The most recent version focuses on a cross-level design with TensorIR as the tensor-level representation
-and Relax as the graph-level representation and Python-first transformations.
-The project's current design goal is to make the ML compiler accessible by enabling most
-transformations to be customizable in Python and bringing a cross-level representation that can jointly
-optimize computational graphs, tensor programs, and libraries. The project is also a foundation
-infra for building Python-first vertical compilers for domains, such as LLMs.
-# MCTS Strategy
+If you want to run the pure MCTS search, set use_llm = False so you do not enable LLM.
