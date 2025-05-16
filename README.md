@@ -15,15 +15,15 @@
 <!--- specific language governing permissions and limitations -->
 <!--- under the License. -->
 
-# LLM MCTS Strategy
-In our project, we use TVM since it is an open source compiler stack for deep learning systems with [Apache-2.0](LICENSE) license. Detailed implementations of this project are included in the folder python/tvm/meta_schedule/search_strategy.
+# LLM-Guided MCTS for Compiler Optimization
+In our project, we use TVM since it is an open source compiler stack for deep learning systems with [Apache-2.0](LICENSE) license. Detailed implementations of this project are included in the folder python/tvm/meta_schedule/search_strategy. The specific files containing the implementations are mcts_search.py and llm_guidance.py. search_strategy.py and __init__.py are also modified for this project.
 
 To run this repo, follow these steps:
 1. Install TVM and configure the environment as detailed in TVM's documentation https://tvm.apache.org/docs/install/index.html
-2. Instead of using the default strategy, create the MCTS+LLM search
-strategy object by
+2. Instead of using the default strategy, create the MCTS+LLM search strategy object by
 
-mcts_strategy = MCTSSearchPyFull(
+```
+llm_mcts_strategy = MCTSSearchPyFull(
     population_size=3,
     init_measured_ratio=0,
     init_min_unmeasured=3,
@@ -44,5 +44,19 @@ mcts_strategy = MCTSSearchPyFull(
     llm_budget=600,
     llm_model_name="API_MODEL_NAME",
 )
+```
+
+If you use the function tune_tir for tuning, pass llm_mcts_strategy as a parameter for tune_tir, like
+
+```
+database = ms.tune_tir(
+    mod=MyModule,
+    target="llvm --num-cores=1",
+    max_trials_global=63,
+    num_trials_per_iter=3,
+    work_dir="./tune_tmp",
+    strategy=llm_mcts_strategy,
+)
+```
 
 If you want to run the pure MCTS search, set use_llm = False so you do not enable LLM.
