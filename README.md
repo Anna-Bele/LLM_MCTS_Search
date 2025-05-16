@@ -20,7 +20,7 @@ In our project, we use TVM since it is an open source compiler stack for deep le
 
 To run this repo, follow these steps:
 1. Install TVM and configure the environment as detailed in TVM's documentation https://tvm.apache.org/docs/install/index.html
-2. Instead of using the default strategy, create the MCTS+LLM search strategy object by
+2. Instead of using the default strategy, create the LLM guided MCTS search strategy object by
 
 ```
 llm_mcts_strategy = MCTSSearchPyFull(
@@ -46,7 +46,7 @@ llm_mcts_strategy = MCTSSearchPyFull(
 )
 ```
 
-If you use the function tune_tir for tuning, pass llm_mcts_strategy as a parameter for tune_tir, like
+If you use the function tune_tir for tuning, pass llm_mcts_strategy as a parameter of tune_tir, like
 
 ```
 database = ms.tune_tir(
