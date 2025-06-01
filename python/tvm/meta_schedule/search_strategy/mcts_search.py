@@ -1,3 +1,20 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
 import math
 import random
 import logging
@@ -74,7 +91,6 @@ class _SizedMinHeap:
         return items
 
 
-
 class MCTSNode:
     __slots__ = [
         "schedule",
@@ -148,6 +164,7 @@ class MCTSTuner:
         use_llm: bool,
         llm_budget: int,
         llm_policy: Optional["LLMGuidancePolicy"] = None,
+        llm_model_name: str = "",
     ):
         self.population_size = population_size
         self.init_measured_ratio = init_measured_ratio
@@ -182,6 +199,7 @@ class MCTSTuner:
         self.use_llm = use_llm
         self.llm_budget = llm_budget
         self.llm_policy = llm_policy
+        self.llm_model_name = llm_model_name
 
     def attach_search_state(self, search_state: "MCTSTuningState") -> None:
         self._search_state = search_state
@@ -1108,22 +1126,16 @@ class MCTSTuningState:
 
 @derived_object
 class MCTSSearchPyFull(PySearchStrategy):
-    """
-    An MCTS-based search strategy aligned with MetaSchedule 0.20+ best practices.
-    It uses Monte Carlo Tree Search over the design space, letting default measure
-    callbacks handle cost model updates and database commits.
-    """
-
     def __init__(
         self,
-        population_size: int,
-        init_measured_ratio: float,
-        init_min_unmeasured: int,
-        max_fail_count: int,
-        genetic_num_iters: int,
-        genetic_mutate_prob: float,
-        genetic_max_fail_count: int,
-        num_empty_iters_before_early_stop: int = 100,
+        population_size: int = 3,
+        init_measured_ratio: float = 0.0,
+        init_min_unmeasured: int = 3,
+        max_fail_count: int = 20,
+        genetic_num_iters: int = 2,
+        genetic_mutate_prob: float = 0.85,
+        genetic_max_fail_count: int = 2,
+        num_empty_iters_before_early_stop: int = 10,
         max_stale_iters: int = 60,
         diversity_epsilon: float = 1e-6,
         max_stale_diversity_iters: int = 30,
@@ -1136,6 +1148,7 @@ class MCTSSearchPyFull(PySearchStrategy):
         mcts_num_rollouts_per_expansion: int = 1,
         use_llm: bool = False,
         llm_budget: int = 1,
+        llm_model_name: str = "",
     ) -> None:
         super().__init__()
         self.population_size = population_size
@@ -1156,42 +1169,33 @@ class MCTSSearchPyFull(PySearchStrategy):
         self.mcts_max_depth = mcts_max_depth
         self.mcts_num_threads = mcts_num_threads
         self.mcts_num_rollouts_per_expansion = mcts_num_rollouts_per_expansion
-
         self.use_llm = use_llm
         self.llm_budget = llm_budget
-
         self._ctx: Optional["TuneContext"] = None
         self._postprocs: List[Postproc] = []
         self._mutator_probs: Dict[Mutator, float] = {}
         self.state: Optional[MCTSTuningState] = None
 
+        self.llm_model_name = llm_model_name
+
     def _initialize_with_tune_context(self, context: "TuneContext") -> None:
-        """
-        Called once the TuneContext is ready. We can read space_generator, target, etc.
-        """
         self._ctx = context
         if context.space_generator is None:
             raise ValueError("TuneContext.space_generator must be defined.")
         if context.target is None:
             raise ValueError("TuneContext.target must be defined.")
-
-        # collect postprocs
         sg = context.space_generator
         self._postprocs = list(sg.postprocs) if sg.postprocs else []
-
-        # collect mutator_probs
         user_probs = sg.mutator_probs or {}
         for mut, prob_f in user_probs.items():
             p = float(prob_f.value)
             if p > 1e-12:
                 self._mutator_probs[mut] = self._mutator_probs.get(mut, 0.0) + p
-
-        # fallback if empty
         target_kind = str(context.target.kind.name)
         if not self._mutator_probs:
             try:
                 default_muts = Mutator.create(target_kind)
-            except:  # fallback
+            except:
                 default_muts = Mutator.create("llvm")
             if isinstance(default_muts, dict):
                 for m, p2 in default_muts.items():
@@ -1200,13 +1204,10 @@ class MCTSSearchPyFull(PySearchStrategy):
                 p2 = 1.0 / len(default_muts)
                 for m in default_muts:
                     self._mutator_probs[m] = p2
-
-        # normalize
         total_p = sum(self._mutator_probs.values())
         if total_p > 1e-12:
             for k in self._mutator_probs:
                 self._mutator_probs[k] /= total_p
-
         if self.verbose >= 1:
             logger.warning(
                 "_initialize_with_tune_context: MCTSSearch: Using target=%s, found #mutators=%d, rand_state=%s",
@@ -1221,13 +1222,9 @@ class MCTSSearchPyFull(PySearchStrategy):
         database: Optional["Database"],
         cost_model: Optional["CostModel"],
     ) -> None:
-        """
-        Called before the tuning process. We create the MCTSTuner and the MCTSTuningState.
-        """
         if self.state is not None:
             raise ValueError("MCTSSearch.pre_tuning called without post_tuning after previous run")
 
-        # build MCTSTuner
         tuner = MCTSTuner(
             population_size=self.population_size,
             init_measured_ratio=self.init_measured_ratio,
@@ -1255,11 +1252,9 @@ class MCTSSearchPyFull(PySearchStrategy):
             use_llm=self.use_llm,
             llm_budget=self.llm_budget,
             llm_policy=LLMGuidancePolicy(
-            model_name="o3-mini",
+            model_name=self.llm_model_name,
             verbose=True),
         )
-
-        # build MCTSTuningState
         self.state = MCTSTuningState(
             max_trials=max_trials,
             num_trials_per_iter=num_trials_per_iter,
@@ -1269,7 +1264,6 @@ class MCTSSearchPyFull(PySearchStrategy):
             context=self._ctx,
             tuner=tuner,
         )
-
         if self.verbose >= 1:
             logger.warning(
                 "MCTSSearch.pre_tuning => max_trials=%d, num_per_iter=%d, #design_spaces=%d",
@@ -1277,10 +1271,6 @@ class MCTSSearchPyFull(PySearchStrategy):
             )
 
     def post_tuning(self) -> None:
-        """
-        Called after all tuning is finished. We clear state references, 
-        optionally log the best result, etc.
-        """
         if self.state:
             self.state.reset()
             self.state = None
@@ -1288,9 +1278,6 @@ class MCTSSearchPyFull(PySearchStrategy):
             logger.warning("MCTSSearch: Tuning finished in post_tuning().")
 
     def generate_measure_candidates(self) -> Optional[List[MeasureCandidate]]:
-        """
-        Called by the MetaSchedule engine each round to get new schedules for measurement.
-        """
         if not self.state:
             logger.warning("MCTSSearch.generate_measure_candidates called before pre_tuning.")
             return None
@@ -1301,18 +1288,10 @@ class MCTSSearchPyFull(PySearchStrategy):
         measure_candidates: List[MeasureCandidate],
         results: List[RunnerResult],
     ) -> None:
-        """
-        Receives measurement results from the runner and updates the MCTS state.
-        No cost_model/database commits here (rely on default measure callbacks).
-        """
         if self.state:
             self.state.notify_runner_results(measure_candidates, results)
 
     def clone(self) -> "MCTSSearchPyFull":
-        """
-        Clone the search strategy. The new copy has no TuningState; it must be
-        re-initialized with pre_tuning.
-        """
         return MCTSSearchPyFull(
             population_size=self.population_size,
             init_measured_ratio=self.init_measured_ratio,
@@ -1333,6 +1312,7 @@ class MCTSSearchPyFull(PySearchStrategy):
             mcts_num_rollouts_per_expansion=self.mcts_num_rollouts_per_expansion,
             use_llm=self.use_llm,
             llm_budget=self.llm_budget,
+            llm_model_name=self.llm_model_name,
         )
 
 

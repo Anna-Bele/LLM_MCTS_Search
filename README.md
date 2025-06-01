@@ -16,7 +16,7 @@
 <!--- under the License. -->
 
 # LLM-Guided MCTS for Compiler Optimization
-In our project, we use TVM since it is an open source compiler stack for deep learning systems with [Apache-2.0](LICENSE) license. Detailed implementations of this project are included in the folder python/tvm/meta_schedule/search_strategy. The specific files containing the implementations are mcts_search.py and llm_guidance.py. search_strategy.py and __init__.py are also modified for this project.
+In our project, we use TVM since it is an open source compiler stack for deep learning systems with [Apache-2.0](LICENSE) license. 
 
 To run this repo, follow these steps:
 1. Install TVM and configure the environment as detailed in TVM's documentation https://tvm.apache.org/docs/install/index.html
@@ -24,29 +24,15 @@ To run this repo, follow these steps:
 
 ```
 llm_mcts_strategy = MCTSSearchPyFull(
-    population_size=3,
-    init_measured_ratio=0,
-    init_min_unmeasured=3,
-    max_fail_count=20,
-    genetic_num_iters=3,
-    genetic_mutate_prob=0.85,
-    genetic_max_fail_count=2,
-    num_empty_iters_before_early_stop=100,
-    max_stale_iters=60,
-    diversity_epsilon=1e-6,
-    max_stale_diversity_iters=30,
-    trace_commit=True,
-    mcts_ucb_constant=1.41,
-    mcts_max_depth=2000,
-    mcts_num_threads=1,
-    mcts_num_rollouts_per_expansion=1,
     use_llm=True,
     llm_budget=600,
     llm_model_name="API_MODEL_NAME",
 )
 ```
 
-If you use the function tune_tir for tuning, pass llm_mcts_strategy as a parameter of tune_tir, like
+If you want to run the pure MCTS search, set use_llm = False so you do not enable LLM.
+
+To use the function tune_tir for tuning, pass llm_mcts_strategy as a parameter of tune_tir, like
 
 ```
 database = ms.tune_tir(
@@ -58,5 +44,3 @@ database = ms.tune_tir(
     strategy=llm_mcts_strategy,
 )
 ```
-
-If you want to run the pure MCTS search, set use_llm = False so you do not enable LLM.
