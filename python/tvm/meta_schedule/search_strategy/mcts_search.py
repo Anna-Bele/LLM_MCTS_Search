@@ -732,10 +732,9 @@ class MCTSTuner:
 
 class MCTSTuningState:
     """
-    MCTSTuningState tracks the MCTS root, population, # of trials used,
+    MCTSTuningState tracks the MCTS root, population, number of trials used,
     best score, etc. The MCTSTuner performs expansions and rollouts; 
-    MCTSTuningState decides how to handle each iteration (e.g. picking 
-    unmeasured leaves, ranking population, etc.).
+    MCTSTuningState decides how to handle each iteration.
     """
 
     def __init__(
@@ -757,26 +756,21 @@ class MCTSTuningState:
         self.tuner = tuner
         self.tuner.attach_search_state(self)
 
-        # record the mod => workload
         self.mod = context.mod
         self.workload_key = None
         if self.database and self.mod is not None:
             self.workload_key = self.database.commit_workload(self.mod)
-            # also store in tuner for cost model usage
             self.tuner._workload_key = self.workload_key
 
-        # main dynamic state
         self.trial_count = 0
         self.num_empty_iters = 0
         self.used_init_population = False
         self.population: List[Tuple[Schedule, bool]] = []
         self.mcts_root: Optional[MCTSNode] = None
 
-        # sets of workloads
         self.measured_workloads: Set[Workload] = set()
         self.seen_workloads: Set[Workload] = set()
 
-        # best score tracking
         self.best_score_so_far = -float("inf")
         self.stale_iter_count = 0
         self.stale_diversity_count = 0
@@ -784,7 +778,6 @@ class MCTSTuningState:
         self.score_history: List[float] = []
         self.dynamic_pop_size = self.tuner.population_size
 
-        # random seed from context
         rs = context.rand_state
         self.rand_state = rs if rs is not None else 1
         if self.rand_state == 0:
@@ -795,129 +788,19 @@ class MCTSTuningState:
         Called from MCTSSearch.post_tuning().
         """
 
-    # -------------------------------------------------------------------------
-    # The main method called by the strategy: generate_measure_candidates
-    # -------------------------------------------------------------------------
-#    def generate_measure_candidates(self) -> Optional[List[MeasureCandidate]]:
-#        """
-#        Orchestrates MCTS expansions and picks unmeasured best schedules 
-#        as measure candidates (directly from explore()).
-#        """
-#        if self.tuner.verbose >= 1:
-#            logger.warning(
-#                "[DEBUG] Enter generate_measure_candidates: trial_count=%d, max_trials=%d",
-#                self.trial_count, self.max_trials
-#            )
-#
-#        if self.trial_count >= self.max_trials:
-#            return None
-#
-#        remaining = self.max_trials - self.trial_count
-#        batch_size = min(remaining, self.num_trials_per_iter)
-#        if batch_size <= 0:
-#            return None
-#
-#        # On first call, initialize root node & population
-#        if not self.used_init_population:
-#            init_pop = self._init_population()
-#            if not init_pop:
-#                return None
-#            self.mcts_root = MCTSNode(schedule=None, parent=None, depth=0)
-#            for (sch, is_measured) in init_pop:
-#                child = MCTSNode(schedule=sch, parent=self.mcts_root, depth=1)
-#                self.mcts_root.children.append(child)
-#            self.population = init_pop
-#            self.used_init_population = True
-#
-#            if self.tuner.verbose >= 1:
-#                logger.warning(
-#                    "generate_measure_candidates: MCTS: Initialized root with %d child schedules.",
-#                    len(init_pop)
-#                )
-#
-#        # Expand and get updated top-K unmeasured schedules
-#        self.population = self.tuner.explore(
-#            mcts_root=self.mcts_root,
-#            population=self.population,
-#            dynamic_pop_size=self.dynamic_pop_size,
-#            rand_state=self.rand_state,
-#        )
-#
-#        if not self.population:
-#            # no unmeasured => increment empty iters
-#            self.num_empty_iters += 1
-#            if self.tuner.verbose >= 1:
-#                logger.warning(
-#                    "generate_measure_candidates: MCTS: explore() returned empty => empty iters=%d",
-#                    self.num_empty_iters
-#                )
-#            if self.num_empty_iters >= self.tuner.num_empty_iters_before_early_stop:
-#                # early stop
-#                if self.tuner.verbose >= 1:
-#                    logger.warning("generate_measure_candidates: MCTS: Stopping early => repeated empty iters.")
-#                return None
-#            return None
-#
-#        # Build measure candidates from the top unmeasured schedules (up to batch_size)
-#        unmeasured_schedules = []
-#        for (sch, measured_flag) in self.population:
-#            if not measured_flag:
-#                unmeasured_schedules.append(sch)
-#
-#        if not unmeasured_schedules:
-#            # again, no unmeasured => empty iteration
-#            self.num_empty_iters += 1
-#            if self.tuner.verbose >= 1:
-#                logger.warning(
-#                    "generate_measure_candidates: MCTS: no unmeasured schedules => empty iters=%d",
-#                    self.num_empty_iters
-#                )
-#            if self.num_empty_iters >= self.tuner.num_empty_iters_before_early_stop:
-#                if self.tuner.verbose >= 1:
-#                    logger.warning("generate_measure_candidates: stopping early => repeated empty iters.")
-#                return None
-#            return None
-#
-#        # Truncate to the batch_size we want
-#        unmeasured_schedules = unmeasured_schedules[:batch_size]
-#
-#        measure_cands: List[MeasureCandidate] = []
-#        for sch in unmeasured_schedules:
-#            arg_info = ArgInfo.from_entry_func(sch.mod, remove_preproc=True)
-#            measure_cands.append(MeasureCandidate(sch, arg_info))
-#
-#        if self.tuner.verbose >= 1:
-#            logger.warning(
-#                "generate_measure_candidates: [DEBUG] MCTS => returning %d cands; trial_count=%d, "
-#                "batch_size_requested=%d, used_init_population=%s",
-#                len(measure_cands),
-#                self.trial_count,
-#                batch_size,
-#                str(self.used_init_population),
-#            )
-#        return measure_cands
     
     def generate_measure_candidates(self) -> Optional[List[MeasureCandidate]]:
-        """
-        Called by the MetaSchedule engine each round to get new schedules for measurement.
-        We'll call tuner.explore() to do expansions, then pick unmeasured schedules
-        with our eps-greedy approach.
-        """
         if self.tuner.verbose >= 1:
             logger.warning(
                 "[DEBUG] Enter generate_measure_candidates: trial_count=%d, max_trials=%d",
                 self.trial_count, self.max_trials
             )
-
         if self.trial_count >= self.max_trials:
             return None
-
         remaining = self.max_trials - self.trial_count
         batch_size = min(remaining, self.num_trials_per_iter)
         if batch_size <= 0:
             return None
-
-        # On first call, init population
         if not self.used_init_population:
             init_pop = self._init_population()
             if not init_pop:
@@ -928,23 +811,19 @@ class MCTSTuningState:
                 self.mcts_root.children.append(child)
             self.population = init_pop
             self.used_init_population = True
-
             if self.tuner.verbose >= 1:
                 logger.warning(
                     "generate_measure_candidates: MCTS: Initialized root with %d child schedules.",
                     len(init_pop)
                 )
 
-        # 1) expansions => new population with all schedules
         self.population = self.tuner.explore(
             mcts_root=self.mcts_root,
             population=self.population,
             dynamic_pop_size=self.dynamic_pop_size,
             rand_state=self.rand_state,
         )
-
         if not self.population:
-            # No schedules => likely all measured or expansions failed
             self.num_empty_iters += 1
             logger.warning(
                 "generate_measure_candidates: MCTS: explore() returned empty => empty iters=%d",
@@ -955,13 +834,10 @@ class MCTSTuningState:
                     logger.warning("generate_measure_candidates: MCTS: Stopping early => repeated empty iters.")
                 return None
             return None
-
-        # 2) Eps-greedy pick up to batch_size unmeasured
         logger.warning(
             "generate_measure_candidates: MCTS: population size=%d before eps-greedy picking",
             len(self.population)
         )
-
         cands_sch = self._pick_unmeasured_eps_greedy(self.population, batch_size, self.rand_state)
         if not cands_sch:
             self.num_empty_iters += 1
@@ -974,18 +850,14 @@ class MCTSTuningState:
                     logger.warning("generate_measure_candidates: stopping early => repeated empty iters.")
                 return None
             return None
-
         logger.warning(
             "generate_measure_candidates: [DEBUG] Eps-greedy picked %d schedules for measurement (batch_size=%d).",
             len(cands_sch), batch_size
         )
-
-        # 3) Build measure candidates
         measure_cands: List[MeasureCandidate] = []
         for sch in cands_sch:
             arg_info = ArgInfo.from_entry_func(sch.mod, remove_preproc=True)
             measure_cands.append(MeasureCandidate(sch, arg_info))
-
         logger.warning(
                 "generate_measure_candidates: [DEBUG] MCTS => returning %d cands; trial_count=%d, "
                 "batch_size_requested=%d, used_init_population=%s",
@@ -1002,43 +874,24 @@ class MCTSTuningState:
         measure_candidates: List[MeasureCandidate],
         results: List[RunnerResult],
     ) -> None:
-        """
-        Called after the measure_candidates have been built and run on the target.
-        IMPORTANT: We do NOT call cost_model.update(...) or database.commit_tuning_record(...)
-        here. We rely on the default measure callbacks to handle that.
-        
-        This method only handles MCTS-specific bookkeeping: 
-          - marking schedules as measured
-          - tracking best performance
-          - deciding if we are "stale" or should early-stop
-        """
         if self.database is None:
             logger.warning("database is not defined, skipping MCTS measure update.")
             return
 
         num_measured_now = 0
         best_run_sec = float("inf")
-
-        # Go through each measured candidate
         for cand, res in zip(measure_candidates, results):
             sch = cand.sch
             mod = sch.mod
             wl = self.database.commit_workload(mod)
-
-            # If we got valid timing => track best performance
             if res.run_secs and all(t >= 0 for t in res.run_secs):
                 run_sec = sum(res.run_secs) / len(res.run_secs)
                 if run_sec < best_run_sec:
                     best_run_sec = run_sec
-
-                # Mark schedule measured in MCTS sets
                 self.measured_workloads.add(wl)
                 self._mark_schedule_measured(sch)
                 num_measured_now += 1
-
         self.trial_count += num_measured_now
-
-        # Evaluate improvement
         if best_run_sec < float("inf"):
             new_score = 1.0 / best_run_sec
             self.score_history.append(new_score)
@@ -1053,7 +906,6 @@ class MCTSTuningState:
                         self.stale_iter_count
                     )
         else:
-            # no valid runs => score=0
             self.score_history.append(0.0)
 
         # # Check population diversity
@@ -1095,24 +947,17 @@ class MCTSTuningState:
                 num_measured_now, self.trial_count, self.stale_iter_count, self.stale_diversity_count
             )
 
-    # -------------------------------------------------------------------------
-    # Initialization of population
-    # -------------------------------------------------------------------------
     def _init_population(self) -> List[Tuple[Schedule, bool]]:
         """
         Combine schedules from DB (measured) and random design-space samples (unmeasured).
         """
-        # measured from DB
         num_measured_wanted = int(self.tuner.population_size * self.tuner.init_measured_ratio)
         measured_from_db = self._pick_best_from_database(num_measured_wanted)
-
-        # random from design space
         need_rand = max(
             self.tuner.population_size - len(measured_from_db),
             self.tuner.init_min_unmeasured
         )
         unmeasured_rand = self._sample_init_population(need_rand)
-
         logger.warning(
             "[MCTS init_pop] from DB: %d, from random: %d, population_size=%d, init_min_unmeasured=%d",
             len(measured_from_db),
@@ -1120,33 +965,19 @@ class MCTSTuningState:
             self.tuner.population_size,
             self.tuner.init_min_unmeasured
         )
-
         combined = [(sch, True) for sch in measured_from_db] + \
                    [(sch, False) for sch in unmeasured_rand]
-
-        # if not enough unmeasured
-        if len(combined) < self.tuner.init_min_unmeasured and self.tuner.verbose >= 1:
-            logger.warning("MCTS: Could not collect enough unmeasured schedules.")
-
-        # shuffle => truncate to population size
         random.shuffle(combined)
         if len(combined) > self.tuner.population_size:
             combined = combined[: self.tuner.population_size]
-
-        # update sets
         for (sch, measured_flag) in combined:
             wl = self.tuner._commit_workload_cached(sch)
-            # wl = self.database.commit_workload(sch.mod)
             self.seen_workloads.add(wl)
             if measured_flag:
                 self.measured_workloads.add(wl)
         return combined
 
     def _pick_best_from_database(self, num: int) -> List[Schedule]:
-        """
-        Pick top 'num' schedules from DB. 
-        If the database is empty or num<=0 => return [].
-        """
         if num <= 0 or not self.database:
             return []
         out = []
@@ -1161,27 +992,15 @@ class MCTSTuningState:
         return out
 
     def _replay_schedule(self, trace: Optional[Trace]) -> Optional[Schedule]:
-        """
-        Basic replay for a trace from the database (similar to the tuner’s _replay_schedule).
-        """
-        # If there's no trace or context, we can't replay anything
         if not trace or not self.context or not self.context.mod:
             return None
-        
         mod = self.context.mod
-        
         try:
-            # Create a fresh schedule from the module
             sch = Schedule(mod, debug_mask="all")
-            # Apply the trace instructions, skipping any postproc instructions
             trace.apply_to_schedule(sch, remove_postproc=True)
         except (InvalidScheduleError, tvm.TVMError):
             return None
-    
-        # Enter postproc mode so we can manually run the final constraints
         sch.enter_postproc()
-        
-        # Just call your Python-based postprocs directly
         for proc in self.tuner._postprocs:
             try:
                 if not proc.apply(sch):
@@ -1191,10 +1010,6 @@ class MCTSTuningState:
         return sch
 
     def _sample_init_population(self, num: int) -> List[Schedule]:
-        """
-        Simple random sampling from the design_spaces.
-        Alternatively, can use a parallel C++ approach if desired.
-        """
         out = []
         fails = 0
         n_spaces = len(self.design_spaces)
@@ -1220,120 +1035,77 @@ class MCTSTuningState:
         total_needed: int,
         rand_state: int
     ) -> List[tvm.tir.Schedule]:
-        """
-        From `schedules_with_flags`, pick up to `total_needed` schedules that are unmeasured,
-        using an eps-greedy fraction from top cost-model and random from the remainder.
-        """
-
         logger.warning(
             "[DEBUG] _pick_unmeasured_eps_greedy called with total_needed=%d, eps_greedy=%.3f",
             total_needed, 0.05
         )
-
-        # 1) Collect unmeasured schedules
         unmeasured = []
         for (sch, measured_flag) in schedules_with_flags:
             if not measured_flag:
                 unmeasured.append(sch)
-
         logger.warning("[DEBUG] Found %d unmeasured schedules.", len(unmeasured))
-
         if not unmeasured:
             return []
-
-        # 2) Cost model scores => sort descending
         preds = self.tuner._predict_normalized_score(unmeasured)
         logger.warning("[DEBUG] Computed cost-model predictions for %d unmeasured schedules.", len(preds))
-
         scored = list(zip(unmeasured, preds))
         scored.sort(key=lambda x: x[1], reverse=True)
-
         logger.warning(
             "[DEBUG] Top schedule after sorting has predicted score=%.4f if the list is non-empty.",
             scored[0][1] if scored else -1.0
         )
-
-        # 3) Eps-greedy fraction
-        # e.g. if eps_greedy=0.05 => 5% random, 95% best
         n_total = min(total_needed, len(scored))
         n_rand = int(round(n_total * 0.05))
         n_top = n_total - n_rand
-
         logger.warning(
             "[DEBUG] Eps-greedy selection: total_needed=%d => n_top=%d, n_rand=%d",
             n_total, n_top, n_rand
         )
-
         top_part = scored[:n_top]
         leftover = scored[n_top:]
-
         random_schedules = []
         if leftover and n_rand > 0:
-            # set seed if you want reproducible random picks
             random.seed(rand_state)
             n_rand = min(n_rand, len(leftover))
             random_part = random.sample(leftover, n_rand)
             random_schedules = [sch for (sch, _) in random_part]
-
         top_schedules = [sch for (sch, _) in top_part]
-
         combined = top_schedules + random_schedules
         logger.warning(
             "[DEBUG] _pick_unmeasured_eps_greedy => returning %d schedules => %d top + %d random",
             len(combined), len(top_schedules), len(random_schedules)
         )
-
         return combined
 
-
-
-    # -------------------------------------------------------------------------
-    # Mark schedule measured
-    # -------------------------------------------------------------------------
     def _mark_schedule_measured(self, sch: Schedule):
-        """
-        Mark the (sch, measured=True) in the population if it exists there.
-        """
         wl = self.database.commit_workload(sch.mod)
         self.measured_workloads.add(wl)
         for i, (pop_sch, was_measured) in enumerate(self.population):
             if pop_sch == sch and not was_measured:
                 self.population[i] = (pop_sch, True)
 
-    # -------------------------------------------------------------------------
-    # Diversity
-    # -------------------------------------------------------------------------
+
     def _predict_population_scores(self, pop: List[Tuple[Schedule, bool]]) -> List[float]:
-        """
-        Return predicted cost-model scores for the schedules in pop.
-        """
         schs = [p[0] for p in pop]
         if not schs:
             return []
         return self.tuner._predict_normalized_score(schs)
 
     def _check_population_diversity(self, scores: List[float]) -> float:
-        """
-        Compute stddev of predicted scores as a measure of diversity.
-        """
         if not scores:
             return 0.0
         mean_val = sum(scores) / len(scores)
         var = sum((s - mean_val) ** 2 for s in scores) / len(scores)
         cur_div = math.sqrt(var)
         self.diversity_history.append(cur_div)
-        # Keep last 10 diversity values
         if len(self.diversity_history) > 10:
             self.diversity_history.pop(0)
-        # Adapt the threshold slightly based on recent diversity
         avg_div = sum(self.diversity_history) / len(self.diversity_history)
         self.tuner.diversity_epsilon = 0.5 * avg_div
         return cur_div
 
 
-# -----------------------------------------------------------------------------
-# The final MCTS search strategy to register with MetaSchedule
-# -----------------------------------------------------------------------------
+
 @derived_object
 class MCTSSearchPyFull(PySearchStrategy):
     """
