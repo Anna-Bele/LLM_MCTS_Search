@@ -47,30 +47,13 @@ logger = logging.getLogger("meta_schedule")
 logger.setLevel(logging.DEBUG)
 
 
-# -----------------------------------------------------------------------------
-# Helper: A sized min-heap for storing top-K schedules by predicted score
-# -----------------------------------------------------------------------------
 class _SizedMinHeap:
-    """
-    Maintains top size_limit items by real score, storing an internal tuple:
-      (neg_score, push_counter, schedule, measured_flag)
-
-    The 'push_counter' is a strictly increasing tie-breaker so that Python's
-    heapq never needs to compare two Schedule objects directly.
-
-    Used below for population ranking based on cost-model predictions.
-    """
-
     def __init__(self, size_limit: int):
         self._size_limit = size_limit
         self._heap = []
         self._push_counter = 0  # strictly increasing for tie-breaking
 
     def push(self, sch: Schedule, score: float, measured_flag: bool) -> None:
-        """
-        Push a schedule with a numeric 'score' into the min-heap. We keep only
-        the top 'size_limit' schedules (by largest score).
-        """
         neg_score = -score
         self._push_counter += 1
         item = (neg_score, self._push_counter, sch, measured_flag)
@@ -78,16 +61,11 @@ class _SizedMinHeap:
             heapq.heappush(self._heap, item)
         else:
             worst_neg, _, _, _ = self._heap[0]
-            # If the new item is "better" => negative score is more negative => bigger real score
             if neg_score > worst_neg:
-                # means new item is worse; discard it
                 return
             heapq.heapreplace(self._heap, item)
 
     def items_descending(self) -> List[Tuple[float, Schedule, bool]]:
-        """
-        Return all items in descending order by 'score' (i.e., -neg_score).
-        """
         items = []
         for (neg, _, sch, meas) in self._heap:
             score = -neg
@@ -96,9 +74,7 @@ class _SizedMinHeap:
         return items
 
 
-# -----------------------------------------------------------------------------
-# MCTS Node
-# -----------------------------------------------------------------------------
+
 class MCTSNode:
     """
     A node in the MCTS tree.
