@@ -19,7 +19,7 @@
 In our project, we use TVM since it is an open source compiler stack for deep learning systems with [Apache-2.0](LICENSE) license. 
 
 To run this repo, follow these steps:
-1. Install TVM and configure the environment as detailed in TVM's documentation https://tvm.apache.org/docs/install/index.html
+1. Clone this repo. Configure the environment as detailed in TVM's documentation https://tvm.apache.org/docs/install/index.html
 2. Instead of using the default strategy, create the LLM guided MCTS search strategy object by
 
 ```
