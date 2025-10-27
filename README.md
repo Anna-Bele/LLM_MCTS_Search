@@ -15,7 +15,8 @@
 <!--- specific language governing permissions and limitations -->
 <!--- under the License. -->
 
-# LLM-Guided MCTS for Compiler Optimization
+# REASONING COMPILER
+This is the official implementation of "REASONING COMPILER: LLM-Guided Optimizations for Efficient Model Serving" (NeurIPS 2025)
 In our project, we use TVM since it is an open source compiler stack for deep learning systems with [Apache-2.0](LICENSE) license. 
 
 To run this repo, follow these steps:
