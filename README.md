@@ -17,6 +17,7 @@
 
 # REASONING COMPILER
 This is the official implementation of "REASONING COMPILER: LLM-Guided Optimizations for Efficient Model Serving" (NeurIPS 2025)
+arXiv: https://arxiv.org/abs/2506.01374
 
 In our project, we use TVM since it is an open source compiler stack for deep learning systems with [Apache-2.0](LICENSE) license. 
 
