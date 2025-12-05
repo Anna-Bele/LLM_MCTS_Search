@@ -16,12 +16,11 @@
 <!--- under the License. -->
 
 # REASONING COMPILER
-This is the official implementation of "REASONING COMPILER: LLM-Guided Optimizations for Efficient Model Serving" (NeurIPS 2025)
-
-arXiv: https://arxiv.org/abs/2506.01374
+This is the official implementation of [**REASONING COMPILER: LLM-Guided Optimizations for Efficient Model Serving**](https://arxiv.org/abs/2506.01374) (NeurIPS 2025)
 
 In our project, we use TVM since it is an open source compiler stack for deep learning systems with [Apache-2.0](LICENSE) license. 
 
+## Quick Start
 To run this repo, follow these steps:
 1. Clone this repo. Configure the environment as detailed in TVM's documentation https://tvm.apache.org/docs/install/index.html
 2. Instead of using the default strategy, create the LLM guided MCTS search strategy object by
@@ -47,4 +46,15 @@ database = ms.tune_tir(
     work_dir="./tune_tmp",
     strategy=llm_mcts_strategy,
 )
+```
+
+## Citation
+```bibtex
+@inproceedings{
+tang2025reasoning,
+title={{REASONING} {COMPILER}: {LLM}-Guided Optimizations for Efficient Model Serving},
+author={Annabelle Sujun Tang and Christopher Priebe and Rohan Mahapatra and Lianhui Qin and Hadi Esmaeilzadeh},
+booktitle={The Thirty-ninth Annual Conference on Neural Information Processing Systems},
+year={2025}
+}
 ```
